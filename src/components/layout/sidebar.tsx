@@ -1,10 +1,12 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { AccountSelector, type Account } from "@/components/chat/account-selector";
 import type { ConversationSummary } from "@/components/chat/conversation-api";
 import { Icon } from "@/components/ui/icons";
+import type { User } from "@/lib/db/schema";
 
 type SidebarProps = {
   account: Account;
@@ -19,6 +21,7 @@ type SidebarProps = {
   onRenameConversation: (conversation: ConversationSummary) => void;
   onDeleteConversation: (conversation: ConversationSummary) => void;
   onToggleCollapse: () => void;
+  user: Pick<User, "name" | "email" | "picture">;
 };
 
 export function Sidebar({
@@ -34,7 +37,9 @@ export function Sidebar({
   onRenameConversation,
   onDeleteConversation,
   onToggleCollapse,
+  user,
 }: SidebarProps) {
+  const router = useRouter();
   const [search, setSearch] = useState("");
   const filteredConversations = conversations.filter((conversation) =>
     conversation.title.toLowerCase().includes(search.trim().toLowerCase()),
@@ -81,10 +86,12 @@ export function Sidebar({
         <div className={`${isCollapsed ? "space-y-3" : "border-t border-slate-100 pt-4"}`}>
           <button aria-label="Open settings" className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-xs font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 ${isCollapsed ? "justify-center" : ""}`} type="button"><Icon name="settings" />{!isCollapsed && "Settings"}</button>
           {!isCollapsed && <AccountSelector onChange={onAccountChange} value={account} />}
-          {!isCollapsed && <div className="mt-3 flex items-center gap-2 rounded-xl border border-slate-200/80 bg-white p-2">
-            <div className="flex size-8 items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-700">TC</div>
-            <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">Tejesh</p><p className="truncate text-[10px] text-slate-400">Personal workspace</p></div>
-            <Icon className="size-3.5 text-slate-300" name="chevron-right" />
+          {!isCollapsed && <div className="mt-3 rounded-xl border border-slate-200/80 bg-white p-2">
+            <div className="flex items-center gap-2">
+              <div className="flex size-8 items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-700">{user.name.slice(0, 2).toUpperCase()}</div>
+              <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">{user.name}</p><p className="truncate text-[10px] text-slate-400">{user.email}</p></div>
+            </div>
+            <button className="mt-2 w-full rounded-lg px-2 py-1.5 text-left text-xs font-medium text-slate-500 hover:bg-slate-50 hover:text-slate-800" onClick={() => { void fetch("/api/auth/logout", { method: "POST" }).then(() => router.push("/sign-in")); }} type="button">Sign out</button>
           </div>}
         </div>
         <button aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"} className="mt-3 hidden size-8 items-center justify-center self-end rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 lg:flex" onClick={onToggleCollapse} type="button"><Icon name="panel" /></button>

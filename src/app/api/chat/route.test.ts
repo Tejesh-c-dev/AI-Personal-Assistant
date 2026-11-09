@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
+vi.mock("../../../lib/auth", () => ({
+  getCurrentUser: vi.fn().mockResolvedValue({ id: "user-1" }),
+}));
 vi.mock("../../../lib/conversations", () => ({
   appendMessage: vi.fn().mockResolvedValue({}),
   createConversation: vi.fn().mockResolvedValue({
@@ -20,6 +23,7 @@ vi.mock("../../../lib/conversations", () => ({
 }));
 
 import { POST } from "./route";
+import * as auth from "../../../lib/auth";
 import * as conversationRepository from "../../../lib/conversations";
 
 const originalFetch = globalThis.fetch;
@@ -35,12 +39,26 @@ function makeRequest(body: unknown) {
 afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+  vi.useRealTimers();
   globalThis.fetch = originalFetch;
 });
 
 describe("POST /api/chat", () => {
+  it("returns 401 without a server session", async () => {
+    vi.mocked(auth.getCurrentUser).mockResolvedValueOnce(null);
+
+    const response = await POST(makeRequest({
+      message: "Hello",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      account: "personal",
+    }));
+
+    expect(response.status).toBe(401);
+  });
+
   it("forwards the account instruction and preserves a valid upstream response", async () => {
     vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
+    vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ output: "Done" }), { status: 200 }),
     );
@@ -55,8 +73,11 @@ describe("POST /api/chat", () => {
     );
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ output: "Done" });
+    const responseBody = await response.json();
+    expect(responseBody).toEqual({ output: "Done" });
+    expect(JSON.stringify(responseBody)).not.toContain("test-webhook-secret");
     expect(conversationRepository.createConversation).toHaveBeenCalledWith({
+      userId: "user-1",
       sessionId: "00000000-0000-4000-8000-000000000002",
       title: "Check my emails",
       account: "personal",
@@ -75,10 +96,64 @@ describe("POST /api/chat", () => {
       "http://localhost:5678/webhook/chat",
       expect.objectContaining({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-N8N-Webhook-Secret": "test-webhook-secret",
+        },
         body: JSON.stringify({
           sessionId: "00000000-0000-4000-8000-000000000002",
           user: "Use only the Personal Gmail account.\n\nCheck my emails",
+        }),
+      }),
+    );
+  });
+
+  it("fails closed when the webhook secret is missing", async () => {
+    vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+
+    const response = await POST(
+      makeRequest({
+        message: "Hello",
+        sessionId: "00000000-0000-4000-8000-000000000002",
+        account: "personal",
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "The n8n webhook secret is not configured.",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["personal", "Use only the Personal Gmail account."],
+    ["official", "Use only the Official Gmail account."],
+    ["both", "Use both Personal and Official Gmail accounts when the request involves email."],
+  ] as const)("preserves the %s account workflow instruction", async (account, instruction) => {
+    vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
+    vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ output: "Done" }), { status: 200 }),
+    );
+    globalThis.fetch = fetchMock;
+
+    await POST(
+      makeRequest({
+        message: "Check my emails",
+        sessionId: "00000000-0000-4000-8000-000000000002",
+        account,
+      }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:5678/webhook/chat",
+      expect.objectContaining({
+        body: JSON.stringify({
+          sessionId: "00000000-0000-4000-8000-000000000002",
+          user: `${instruction}\n\nCheck my emails`,
         }),
       }),
     );
@@ -121,6 +196,7 @@ describe("POST /api/chat", () => {
 
   it("returns 502 for an upstream HTTP error while preserving its JSON body", async () => {
     vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
+    vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
     globalThis.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ message: "Workflow failed" }), {
         status: 500,
@@ -143,6 +219,7 @@ describe("POST /api/chat", () => {
 
   it("returns 502 when the upstream request fails", async () => {
     vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
+    vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("connection refused"));
 
     const response = await POST(
@@ -158,6 +235,7 @@ describe("POST /api/chat", () => {
 
   it("returns 504 when the upstream request times out", async () => {
     vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
+    vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
     vi.stubEnv("N8N_WEBHOOK_TIMEOUT_MS", "1");
     globalThis.fetch = vi.fn(
       (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
@@ -179,8 +257,34 @@ describe("POST /api/chat", () => {
     expect(response.status).toBe(504);
   });
 
+  it("uses a 150-second default webhook timeout", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
+    vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
+    globalThis.fetch = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+        new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")),
+          );
+        }),
+    );
+
+    const responsePromise = POST(
+      makeRequest({
+        message: "Hello",
+        sessionId: "00000000-0000-4000-8000-000000000002",
+        account: "personal",
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(150_000);
+
+    await expect(responsePromise).resolves.toHaveProperty("status", 504);
+  });
+
   it("returns 502 for an invalid upstream response", async () => {
     vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
+    vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
     globalThis.fetch = vi.fn().mockResolvedValue(
       new Response("not-json", {
         status: 200,

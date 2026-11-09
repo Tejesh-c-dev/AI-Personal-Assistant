@@ -8,6 +8,20 @@
       "when": 1794232989462,
       "tag": "0000_flippant_cerise",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794244859356,
+      "tag": "0001_famous_toro",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794244971945,
+      "tag": "0002_brave_living_lightning",
+      "breakpoints": true
     }
   ]
 }

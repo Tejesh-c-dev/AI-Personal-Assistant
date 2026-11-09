@@ -1,7 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-import { databaseErrorResponse, invalidRequestResponse, notFoundResponse } from "../../../../lib/api-errors";
+import { databaseErrorResponse, invalidRequestResponse, notFoundResponse, unauthorizedResponse } from "../../../../lib/api-errors";
+import { getCurrentUser } from "../../../../lib/auth";
 import { deleteConversation, getConversation, isAccount, isUuid, updateConversation } from "../../../../lib/conversations";
 import { ACTIVE_CONVERSATION_COOKIE } from "../route";
 
@@ -13,13 +14,20 @@ async function getId(context: RouteContext) {
 }
 
 export async function GET(_request: Request, context: RouteContext) {
+  let user;
+  try {
+    user = await getCurrentUser();
+  } catch (error) {
+    return databaseErrorResponse(error);
+  }
+  if (!user) return unauthorizedResponse();
   const id = await getId(context);
   if (!id) {
     return invalidRequestResponse("Invalid conversation ID.");
   }
 
   try {
-    const conversation = await getConversation(id);
+    const conversation = await getConversation(id, user.id);
     return conversation ? NextResponse.json(conversation) : notFoundResponse();
   } catch (error) {
     return databaseErrorResponse(error);
@@ -27,6 +35,13 @@ export async function GET(_request: Request, context: RouteContext) {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
+  let user;
+  try {
+    user = await getCurrentUser();
+  } catch (error) {
+    return databaseErrorResponse(error);
+  }
+  if (!user) return unauthorizedResponse();
   const id = await getId(context);
   if (!id) {
     return invalidRequestResponse("Invalid conversation ID.");
@@ -54,7 +69,7 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   try {
-    const conversation = await updateConversation(id, {
+    const conversation = await updateConversation(id, user.id, {
       ...(title === undefined ? {} : { title }),
       ...(account === undefined ? {} : { account: account as "personal" | "official" | "both" }),
     });
@@ -65,13 +80,20 @@ export async function PATCH(request: Request, context: RouteContext) {
 }
 
 export async function DELETE(_request: Request, context: RouteContext) {
+  let user;
+  try {
+    user = await getCurrentUser();
+  } catch (error) {
+    return databaseErrorResponse(error);
+  }
+  if (!user) return unauthorizedResponse();
   const id = await getId(context);
   if (!id) {
     return invalidRequestResponse("Invalid conversation ID.");
   }
 
   try {
-    const deleted = await deleteConversation(id);
+    const deleted = await deleteConversation(id, user.id);
     if (!deleted) {
       return notFoundResponse();
     }

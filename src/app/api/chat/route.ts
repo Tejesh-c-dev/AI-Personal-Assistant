@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { databaseErrorResponse } from "../../../lib/api-errors";
+import { databaseErrorResponse, unauthorizedResponse } from "../../../lib/api-errors";
+import { getCurrentUser } from "../../../lib/auth";
 import {
   appendMessage,
   createConversation,
@@ -10,7 +11,7 @@ import {
   updateConversation,
 } from "../../../lib/conversations";
 
-const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = 150_000;
 const MAX_MESSAGE_LENGTH = 4_000;
 const ACTIVE_CONVERSATION_COOKIE = "active_conversation_id";
 const ACCOUNT_INSTRUCTIONS = {
@@ -61,6 +62,16 @@ function errorResponse(message: string, status: number) {
 }
 
 export async function POST(request: Request) {
+  let authenticatedUser;
+  try {
+    authenticatedUser = await getCurrentUser();
+  } catch (error) {
+    return databaseErrorResponse(error);
+  }
+  if (!authenticatedUser) {
+    return unauthorizedResponse();
+  }
+
   let body: unknown;
 
   try {
@@ -77,18 +88,23 @@ export async function POST(request: Request) {
   if (!webhookUrl) {
     return errorResponse("The n8n webhook is not configured.", 503);
   }
+  const webhookSecret = process.env.N8N_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    return errorResponse("The n8n webhook secret is not configured.", 503);
+  }
 
   let conversation;
   try {
-    conversation = await findConversationBySessionId(body.sessionId);
+    conversation = await findConversationBySessionId(authenticatedUser.id, body.sessionId);
     if (!conversation) {
       conversation = await createConversation({
+        userId: authenticatedUser.id,
         sessionId: body.sessionId,
         title: createConversationTitle(body.message),
         account: body.account,
       });
     } else {
-      conversation = await updateConversation(conversation.id, {
+      conversation = await updateConversation(conversation.id, authenticatedUser.id, {
         account: body.account,
         ...(conversation.title === "New conversation"
           ? { title: createConversationTitle(body.message) }
@@ -108,7 +124,7 @@ export async function POST(request: Request) {
     return databaseErrorResponse(error);
   }
 
-  const user = `${ACCOUNT_INSTRUCTIONS[body.account]}\n\n${body.message}`;
+  const userPrompt = `${ACCOUNT_INSTRUCTIONS[body.account]}\n\n${body.message}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), getTimeoutMs());
 
@@ -116,10 +132,13 @@ export async function POST(request: Request) {
   try {
     upstreamResponse = await fetch(webhookUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-N8N-Webhook-Secret": webhookSecret,
+      },
       body: JSON.stringify({
         sessionId: body.sessionId,
-        user,
+        user: userPrompt,
       }),
       signal: controller.signal,
     });

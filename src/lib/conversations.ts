@@ -30,7 +30,7 @@ export function createConversationTitle(content: string): string {
   return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized;
 }
 
-export async function listConversations(): Promise<ConversationSummary[]> {
+export async function listConversations(userId: string): Promise<ConversationSummary[]> {
   const db = getDatabase();
   return db
     .select({
@@ -42,12 +42,17 @@ export async function listConversations(): Promise<ConversationSummary[]> {
       updatedAt: conversations.updatedAt,
     })
     .from(conversations)
+    .where(eq(conversations.userId, userId))
     .orderBy(desc(conversations.updatedAt));
 }
 
-export async function getConversation(id: string): Promise<{ conversation: Conversation; messages: Message[] } | null> {
+export async function getConversation(id: string, userId: string): Promise<{ conversation: Conversation; messages: Message[] } | null> {
   const db = getDatabase();
-  const [conversation] = await db.select().from(conversations).where(eq(conversations.id, id)).limit(1);
+  const [conversation] = await db
+    .select()
+    .from(conversations)
+    .where(and(eq(conversations.id, id), eq(conversations.userId, userId)))
+    .limit(1);
   if (!conversation) {
     return null;
   }
@@ -62,6 +67,7 @@ export async function getConversation(id: string): Promise<{ conversation: Conve
 }
 
 export async function createConversation(input: {
+  userId: string;
   sessionId: string;
   title: string;
   account: Account;
@@ -73,20 +79,24 @@ export async function createConversation(input: {
 
 export async function updateConversation(
   id: string,
+  userId: string,
   input: Partial<Pick<Conversation, "title" | "account">>,
 ): Promise<Conversation | null> {
   const db = getDatabase();
   const [conversation] = await db
     .update(conversations)
     .set({ ...input, updatedAt: new Date() })
-    .where(eq(conversations.id, id))
+    .where(and(eq(conversations.id, id), eq(conversations.userId, userId)))
     .returning();
   return conversation ?? null;
 }
 
-export async function deleteConversation(id: string): Promise<boolean> {
+export async function deleteConversation(id: string, userId: string): Promise<boolean> {
   const db = getDatabase();
-  const deleted = await db.delete(conversations).where(eq(conversations.id, id)).returning({ id: conversations.id });
+  const deleted = await db
+    .delete(conversations)
+    .where(and(eq(conversations.id, id), eq(conversations.userId, userId)))
+    .returning({ id: conversations.id });
   return deleted.length > 0;
 }
 
@@ -101,18 +111,22 @@ export async function appendMessage(input: {
   return message;
 }
 
-export async function findConversationBySessionId(sessionId: string): Promise<Conversation | null> {
-  const db = getDatabase();
-  const [conversation] = await db.select().from(conversations).where(eq(conversations.sessionId, sessionId)).limit(1);
-  return conversation ?? null;
-}
-
-export async function findConversationByIdAndSessionId(id: string, sessionId: string): Promise<Conversation | null> {
+export async function findConversationBySessionId(userId: string, sessionId: string): Promise<Conversation | null> {
   const db = getDatabase();
   const [conversation] = await db
     .select()
     .from(conversations)
-    .where(and(eq(conversations.id, id), eq(conversations.sessionId, sessionId)))
+    .where(and(eq(conversations.sessionId, sessionId), eq(conversations.userId, userId)))
+    .limit(1);
+  return conversation ?? null;
+}
+
+export async function findConversationByIdAndSessionId(id: string, userId: string, sessionId: string): Promise<Conversation | null> {
+  const db = getDatabase();
+  const [conversation] = await db
+    .select()
+    .from(conversations)
+    .where(and(eq(conversations.id, id), eq(conversations.userId, userId), eq(conversations.sessionId, sessionId)))
     .limit(1);
   return conversation ?? null;
 }

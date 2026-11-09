@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
+vi.mock("../../../lib/auth", () => ({
+  getCurrentUser: vi.fn().mockResolvedValue({ id: "user-1" }),
+}));
 vi.mock("next/headers", () => ({
   cookies: async () => ({
     get: (name: string) => name === "active_conversation_id"
@@ -29,6 +32,8 @@ vi.mock("../../../lib/conversations", () => ({
 
 import { POST, GET } from "./route";
 import { DELETE, GET as GET_ITEM, PATCH } from "./[id]/route";
+import * as auth from "../../../lib/auth";
+import * as conversationRepository from "../../../lib/conversations";
 
 const validId = "00000000-0000-4000-8000-000000000001";
 
@@ -45,6 +50,12 @@ afterEach(() => {
 });
 
 describe("conversation API routes", () => {
+  it("returns 401 without a server session", async () => {
+    vi.mocked(auth.getCurrentUser).mockResolvedValueOnce(null);
+    const response = await GET();
+    expect(response.status).toBe(401);
+  });
+
   it("creates a conversation and sets the active conversation cookie", async () => {
     const response = await POST(request({
       sessionId: "00000000-0000-4000-8000-000000000002",
@@ -81,5 +92,6 @@ describe("conversation API routes", () => {
 
     const deleteResponse = await DELETE(new Request("http://localhost"), { params: Promise.resolve({ id: validId }) });
     expect(deleteResponse.status).toBe(404);
+    expect(conversationRepository.getConversation).toHaveBeenCalledWith(validId, "user-1");
   });
 });

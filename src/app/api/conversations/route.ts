@@ -1,7 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-import { databaseErrorResponse, invalidRequestResponse } from "../../../lib/api-errors";
+import { databaseErrorResponse, invalidRequestResponse, unauthorizedResponse } from "../../../lib/api-errors";
+import { getCurrentUser } from "../../../lib/auth";
 import {
   createConversation,
   createConversationTitle,
@@ -24,7 +25,9 @@ function setActiveConversationCookie(response: NextResponse, id: string) {
 
 export async function GET() {
   try {
-    const conversationList = await listConversations();
+    const user = await getCurrentUser();
+    if (!user) return unauthorizedResponse();
+    const conversationList = await listConversations(user.id);
     const activeConversationId = (await cookies()).get(ACTIVE_CONVERSATION_COOKIE)?.value ?? null;
     return NextResponse.json({ conversations: conversationList, activeConversationId });
   } catch (error) {
@@ -33,6 +36,14 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  let user;
+  try {
+    user = await getCurrentUser();
+  } catch (error) {
+    return databaseErrorResponse(error);
+  }
+  if (!user) return unauthorizedResponse();
+
   let body: unknown;
   try {
     body = await request.json();
@@ -55,6 +66,7 @@ export async function POST(request: Request) {
 
   try {
     const conversation = await createConversation({
+      userId: user.id,
       sessionId,
       title: title || "New conversation",
       account,

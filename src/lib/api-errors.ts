@@ -18,3 +18,7 @@ export function invalidRequestResponse(message = "Invalid request.") {
 export function notFoundResponse() {
   return NextResponse.json({ error: "Conversation not found." }, { status: 404 });
 }
+
+export function unauthorizedResponse() {
+  return NextResponse.json({ error: "Authentication is required." }, { status: 401 });
+}
