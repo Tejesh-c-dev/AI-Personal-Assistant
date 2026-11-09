@@ -1,8 +1,17 @@
 @import "tailwindcss";
-
+/* Keep the utilities used by the current TSX UI generated when source scanning misses src files. */
+@source inline("[&_label]:sr-only [&_select]:h-8 [&_select]:rounded-lg [&_select]:bg-slate-50 [&_select]:py-1.5 [&_select]:text-[11px]");
+@source inline("-translate-x-full -translate-y-1/2 : absolute animate-pulse antialiased appearance-none backdrop-blur-[2px] bg-[#1d5bd7] bg-[#fbfbfc] bg-[var(--background)] bg-blue-100 bg-blue-50 bg-blue-500 bg-emerald-500 bg-red-50 bg-slate-50 bg-slate-50/60 bg-slate-900 bg-slate-950/20 bg-transparent bg-white block border border-b border-blue-100 border-dashed border-r");
+@source inline("border-red-100 border-slate-100 border-slate-200 border-slate-200/70 border-slate-200/80 border-t disabled:bg-slate-200 disabled:cursor-not-allowed disabled:text-slate-400 duration-300 fixed flex flex-1 flex-col flex-wrap focus-within:border-blue-300 focus-within:ring-4 focus-within:ring-blue-50 focus:border-blue-300 focus:border-indigo-400 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:ring-blue-50 focus:ring-indigo-100 font-bold font-medium font-semibold");
+@source inline("gap-2 gap-2.5 gap-3 gap-4 grid group group-hover:bg-blue-50 group-hover:text-blue-500 group-hover:translate-x-0.5 h-10 h-[72px] h-full hidden hover:-translate-y-0.5 hover:bg-[#1749af] hover:bg-[#1d5bd7] hover:bg-slate-100 hover:bg-slate-50 hover:border-blue-200 hover:shadow-blue-100/40 hover:shadow-lg hover:text-slate-600 hover:text-slate-700 hover:text-slate-800 inset-0 inset-y-0 items-center items-start");
+@source inline("justify-between justify-center justify-end justify-start leading-5 leading-6 left-0 left-3 lg:block lg:flex lg:flex-none lg:h-dvh lg:h-full lg:hidden lg:min-h-0 lg:overflow-hidden lg:shadow-none lg:static lg:translate-x-0 lg:w-[286px] lg:w-[76px] lg:z-auto max-w-4xl max-w-[min(80%,680px)] max-w-xl mb-2 mb-5 mb-8");
+@source inline("min-h-0 min-h-20 min-h-[116px] min-h-full min-h-screen min-w-0 ml-auto mt-0.5 mt-1 mt-2 mt-3 mt-4 mt-7 mt-8 mx-auto opacity-0 opacity-100 outline-none overflow-y-auto p-2 p-5 pb-1 pb-5 pl-9 placeholder:text-slate-400 pointer-events-none pr-3 pr-9");
+@source inline("pt-4 px-2 px-2.5 px-3 px-4 px-5 py-2 py-2.5 py-3 py-5 py-8 relative resize-none right-3 rounded-2xl rounded-full rounded-lg rounded-xl self-end shadow-[0_10px_35px_rgb(15_23_42_/_0.07)] shadow-[0_1px_2px_rgb(15_23_42_/_0.03)] shadow-blue-200/60 shadow-lg shadow-slate-900/5 shadow-sm shadow-xl shrink-0 size-10");
+@source inline("size-11 size-2 size-3.5 size-4 size-5 size-7 size-8 size-9 sm:block sm:grid-cols-2 sm:mb-9 sm:pb-7 sm:px-8 sm:py-10 sm:text-5xl sm:text-base space-y-3 sr-only text-4xl text-[10px] text-[11px] text-blue-600 text-blue-700 text-center text-left text-red-700 text-slate-300 text-slate-400");
+@source inline("text-slate-500 text-slate-700 text-slate-800 text-slate-900 text-slate-950 text-sm text-white text-xs top-1/2 tracking-[-0.045em] tracking-[0.14em] tracking-[0.16em] tracking-tight transition transition-[width,transform] transition-colors transition-opacity translate-x-0 truncate uppercase w-[150px] w-[286px] w-full z-30 z-40");
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f6f7f9;
+  --foreground: #18212f;
 }
 
 @theme inline {
@@ -12,15 +21,17 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+* {
+  border-color: #e4e7ec;
+}
+
+::selection {
+  background: #dce8ff;
+  color: #173a73;
 }
