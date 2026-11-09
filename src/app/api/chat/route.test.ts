@@ -1,6 +1,26 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("server-only", () => ({}));
+vi.mock("../../../lib/conversations", () => ({
+  appendMessage: vi.fn().mockResolvedValue({}),
+  createConversation: vi.fn().mockResolvedValue({
+    id: "00000000-0000-4000-8000-000000000001",
+    sessionId: "00000000-0000-4000-8000-000000000002",
+    title: "Check my emails",
+    account: "personal",
+  }),
+  createConversationTitle: (value: string) => value.trim().slice(0, 80),
+  findConversationBySessionId: vi.fn().mockResolvedValue(null),
+  isUuid: (value: unknown) => typeof value === "string" && value.length === 36,
+  updateConversation: vi.fn().mockResolvedValue({
+    id: "00000000-0000-4000-8000-000000000001",
+    title: "Check my emails",
+    account: "personal",
+  }),
+}));
+
 import { POST } from "./route";
+import * as conversationRepository from "../../../lib/conversations";
 
 const originalFetch = globalThis.fetch;
 
@@ -13,7 +33,7 @@ function makeRequest(body: unknown) {
 }
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  vi.clearAllMocks();
   vi.unstubAllEnvs();
   globalThis.fetch = originalFetch;
 });
@@ -29,20 +49,35 @@ describe("POST /api/chat", () => {
     const response = await POST(
       makeRequest({
         message: "Check my emails",
-        sessionId: "conversation-uuid",
+        sessionId: "00000000-0000-4000-8000-000000000002",
         account: "personal",
       }),
     );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ output: "Done" });
+    expect(conversationRepository.createConversation).toHaveBeenCalledWith({
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      title: "Check my emails",
+      account: "personal",
+    });
+    expect(conversationRepository.appendMessage).toHaveBeenCalledWith({
+      conversationId: "00000000-0000-4000-8000-000000000001",
+      role: "user",
+      content: "Check my emails",
+    });
+    expect(conversationRepository.appendMessage).toHaveBeenCalledWith({
+      conversationId: "00000000-0000-4000-8000-000000000001",
+      role: "assistant",
+      content: "Done",
+    });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost:5678/webhook/chat",
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sessionId: "conversation-uuid",
+          sessionId: "00000000-0000-4000-8000-000000000002",
           user: "Use only the Personal Gmail account.\n\nCheck my emails",
         }),
       }),
@@ -76,7 +111,7 @@ describe("POST /api/chat", () => {
     const response = await POST(
       makeRequest({
         message: "Hello",
-        sessionId: "session",
+        sessionId: "00000000-0000-4000-8000-000000000002",
         account: "official",
       }),
     );
@@ -95,7 +130,7 @@ describe("POST /api/chat", () => {
     const response = await POST(
       makeRequest({
         message: "Hello",
-        sessionId: "session",
+        sessionId: "00000000-0000-4000-8000-000000000002",
         account: "both",
       }),
     );
@@ -113,7 +148,7 @@ describe("POST /api/chat", () => {
     const response = await POST(
       makeRequest({
         message: "Hello",
-        sessionId: "session",
+        sessionId: "00000000-0000-4000-8000-000000000002",
         account: "personal",
       }),
     );
@@ -136,7 +171,7 @@ describe("POST /api/chat", () => {
     const response = await POST(
       makeRequest({
         message: "Hello",
-        sessionId: "session",
+        sessionId: "00000000-0000-4000-8000-000000000002",
         account: "personal",
       }),
     );
@@ -156,7 +191,7 @@ describe("POST /api/chat", () => {
     const response = await POST(
       makeRequest({
         message: "Hello",
-        sessionId: "session",
+        sessionId: "00000000-0000-4000-8000-000000000002",
         account: "official",
       }),
     );

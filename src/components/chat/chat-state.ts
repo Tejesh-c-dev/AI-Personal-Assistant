@@ -16,6 +16,7 @@ export type ChatAction =
   | { type: "submit"; message: string; messageId: string }
   | { type: "assistant-response"; message: ChatMessage }
   | { type: "request-failed"; message: string }
+  | { type: "load-messages"; messages: ChatMessage[] }
   | { type: "new-chat" };
 
 export const initialChatState: ChatState = {
@@ -56,6 +57,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       };
     case "request-failed":
       return { ...state, error: action.message, isLoading: false };
+    case "load-messages":
+      return { ...state, error: null, isLoading: false, messages: action.messages, composerValue: "" };
     case "new-chat":
       return initialChatState;
   }

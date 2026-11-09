@@ -1,5 +1,17 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Local setup
+
+Copy `.env.example` to `.env.local` and set `N8N_WEBHOOK_URL`, `N8N_WEBHOOK_SECRET` (when required by your workflow), `DATABASE_URL` to the pooled Neon connection string, and `DATABASE_URL_UNPOOLED` to the direct Neon connection string used for migrations. Keep these values server-side and do not commit `.env.local`.
+
+After configuring both database variables, apply the checked-in Drizzle migrations with:
+
+```bash
+npm run db:migrate
+```
+
+The application returns a clear database-unavailable error for history and chat persistence operations when `DATABASE_URL` is empty. It does not run migrations automatically. This project has no authentication or multi-user isolation and is intended for local single-user development only; do not deploy it publicly without adding authentication and authorization.
+
 ## Getting Started
 
 First, run the development server:

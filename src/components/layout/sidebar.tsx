@@ -1,6 +1,9 @@
 "use client";
 
+import { useState } from "react";
+
 import { AccountSelector, type Account } from "@/components/chat/account-selector";
+import type { ConversationSummary } from "@/components/chat/conversation-api";
 import { Icon } from "@/components/ui/icons";
 
 type SidebarProps = {
@@ -10,10 +13,33 @@ type SidebarProps = {
   onAccountChange: (account: Account) => void;
   onClose: () => void;
   onNewChat: () => void;
+  conversations: ConversationSummary[];
+  activeConversationId: string | null;
+  onSelectConversation: (conversation: ConversationSummary) => void;
+  onRenameConversation: (conversation: ConversationSummary) => void;
+  onDeleteConversation: (conversation: ConversationSummary) => void;
   onToggleCollapse: () => void;
 };
 
-export function Sidebar({ account, isOpen, isCollapsed, onAccountChange, onClose, onNewChat, onToggleCollapse }: SidebarProps) {
+export function Sidebar({
+  account,
+  isOpen,
+  isCollapsed,
+  onAccountChange,
+  onClose,
+  onNewChat,
+  conversations,
+  activeConversationId,
+  onSelectConversation,
+  onRenameConversation,
+  onDeleteConversation,
+  onToggleCollapse,
+}: SidebarProps) {
+  const [search, setSearch] = useState("");
+  const filteredConversations = conversations.filter((conversation) =>
+    conversation.title.toLowerCase().includes(search.trim().toLowerCase()),
+  );
+
   return (
     <>
       <button aria-label="Close navigation" className={`fixed inset-0 z-30 bg-slate-950/20 backdrop-blur-[2px] transition-opacity lg:hidden ${isOpen ? "opacity-100" : "pointer-events-none opacity-0"}`} onClick={onClose} type="button" />
@@ -32,18 +58,24 @@ export function Sidebar({ account, isOpen, isCollapsed, onAccountChange, onClose
 
         {!isCollapsed && <div className="relative mt-4">
           <Icon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" name="search" />
-          <input aria-label="Search conversations" className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-xs text-slate-700 outline-none placeholder:text-slate-400 focus:border-blue-300 focus:ring-4 focus:ring-blue-50" placeholder="Search conversations" />
+          <input aria-label="Search conversations" className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-xs text-slate-700 outline-none placeholder:text-slate-400 focus:border-blue-300 focus:ring-4 focus:ring-blue-50" onChange={(event) => setSearch(event.target.value)} placeholder="Search conversations" value={search} />
         </div>}
 
         <section className={`flex-1 ${isCollapsed ? "mt-7" : "mt-8"}`} aria-labelledby="history-heading">
           <div className={`flex items-center ${isCollapsed ? "justify-center" : "px-2"}`}>
             <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400" id="history-heading">{isCollapsed ? "..." : "Recent chats"}</h2>
           </div>
-          {!isCollapsed && <div className="mt-4 rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-5 text-center">
+          {!isCollapsed && (filteredConversations.length === 0 ? <div className="mt-4 rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-5 text-center">
             <div className="mx-auto flex size-9 items-center justify-center rounded-full bg-white text-slate-300 shadow-sm"><Icon className="size-4" name="message" /></div>
-            <p className="mt-3 text-xs font-medium text-slate-500">No conversations yet</p>
-            <p className="mt-1 text-[11px] leading-5 text-slate-400">Your recent chats will appear here.</p>
-          </div>}
+            <p className="mt-3 text-xs font-medium text-slate-500">{search ? "No matching conversations" : "No conversations yet"}</p>
+            <p className="mt-1 text-[11px] leading-5 text-slate-400">{search ? "Try a different search." : "Your recent chats will appear here."}</p>
+          </div> : <div className="mt-4 space-y-1">
+            {filteredConversations.map((conversation) => <div className={`group flex items-center gap-1 rounded-xl px-2 py-2 transition ${conversation.id === activeConversationId ? "bg-blue-50 text-blue-800" : "text-slate-600 hover:bg-slate-100"}`} key={conversation.id}>
+              <button className="min-w-0 flex-1 truncate text-left text-xs font-medium" onClick={() => onSelectConversation(conversation)} type="button">{conversation.title}</button>
+              <button aria-label={`Rename ${conversation.title}`} className="hidden rounded-md p-1 text-slate-400 hover:bg-white hover:text-slate-700 group-hover:block" onClick={() => onRenameConversation(conversation)} type="button">Rename</button>
+              <button aria-label={`Delete ${conversation.title}`} className="hidden rounded-md p-1 text-slate-400 hover:bg-white hover:text-red-600 group-hover:block" onClick={() => onDeleteConversation(conversation)} type="button">Delete</button>
+            </div>)}
+          </div>)}
         </section>
 
         <div className={`${isCollapsed ? "space-y-3" : "border-t border-slate-100 pt-4"}`}>
