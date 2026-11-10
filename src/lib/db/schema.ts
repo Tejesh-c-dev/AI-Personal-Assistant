@@ -1,5 +1,5 @@
 import { relations, sql } from "drizzle-orm";
-import { check, index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { check, foreignKey, index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 export const users = pgTable(
   "users",
@@ -34,17 +34,68 @@ export const sessions = pgTable(
   ],
 );
 
+export const googleIdentities = pgTable(
+  "google_identities",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    googleSubject: text("google_subject").notNull(),
+    email: text("email").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("google_identities_subject_unique").on(table.googleSubject),
+    uniqueIndex("google_identities_user_id_id_unique").on(table.userId, table.id),
+  ],
+);
+
+export const googleAccounts = pgTable(
+  "google_accounts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    identityId: uuid("identity_id").notNull(),
+    accountType: text("account_type").notNull(),
+    refreshTokenCiphertext: text("refresh_token_ciphertext").notNull(),
+    grantedScopes: text("granted_scopes").array().notNull().default(sql`'{}'::text[]`),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("google_accounts_user_type_unique").on(table.userId, table.accountType),
+    foreignKey({ columns: [table.userId, table.identityId], foreignColumns: [googleIdentities.userId, googleIdentities.id], name: "google_accounts_identity_owner_fk" }).onDelete("cascade"),
+    check("google_accounts_type_check", sql`${table.accountType} in ('personal', 'official')`),
+    check("google_accounts_status_check", sql`${table.status} in ('active', 'revoked')`),
+  ],
+);
+
 export const oauthTransactions = pgTable(
   "oauth_transactions",
   {
     stateHash: text("state_hash").primaryKey(),
     nonce: text("nonce").notNull(),
     codeVerifier: text("code_verifier").notNull(),
+    operation: text("operation").notNull().default("login"),
+    initiatingUserId: uuid("initiating_user_id").references(() => users.id, { onDelete: "cascade" }),
+    accountType: text("account_type"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index("oauth_transactions_expires_at_idx").on(table.expiresAt)],
+  (table) => [
+    index("oauth_transactions_expires_at_idx").on(table.expiresAt),
+    check("oauth_transactions_operation_check", sql`${table.operation} in ('login', 'connect')`),
+    check("oauth_transactions_account_type_check", sql`${table.accountType} is null or ${table.accountType} in ('personal', 'official')`),
+    check("oauth_transactions_connect_user_check", sql`(${table.operation} = 'login' and ${table.initiatingUserId} is null and ${table.accountType} is null) or (${table.operation} = 'connect' and ${table.initiatingUserId} is not null and ${table.accountType} is not null)`),
+  ],
 );
+
+export const googleCapabilities = pgTable("google_capabilities", {
+  nonce: text("nonce").primaryKey(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+}, (table) => [index("google_capabilities_expires_at_idx").on(table.expiresAt)]);
 
 export const conversations = pgTable(
   "conversations",
@@ -64,6 +115,18 @@ export const conversations = pgTable(
     check("conversations_account_check", sql`${table.account} in ('personal', 'official', 'both')`),
   ],
 );
+
+export const googleWriteApprovals = pgTable("google_write_approvals", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  conversationId: uuid("conversation_id").notNull().references(() => conversations.id, { onDelete: "cascade" }),
+  accountLabel: text("account_label").notNull(),
+  operation: text("operation").notNull(),
+  payload: text("payload").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [index("google_write_approvals_user_conversation_idx").on(table.userId, table.conversationId)]);
 
 export const messages = pgTable(
   "messages",

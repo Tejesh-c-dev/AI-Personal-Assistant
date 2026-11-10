@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 import { databaseErrorResponse, unauthorizedResponse } from "../../../lib/api-errors";
 import { getCurrentUser } from "../../../lib/auth";
+import { issueGoogleCapability, issueGoogleProposalCapability, GOOGLE_OPERATIONS, type GoogleOperation } from "../../../lib/google-api";
+import { consumeGoogleWriteApproval } from "../../../lib/google-write-approvals";
 import {
   appendMessage,
   createConversation,
@@ -15,9 +17,9 @@ const DEFAULT_TIMEOUT_MS = 150_000;
 const MAX_MESSAGE_LENGTH = 4_000;
 const ACTIVE_CONVERSATION_COOKIE = "active_conversation_id";
 const ACCOUNT_INSTRUCTIONS = {
-  personal: "Use only the Personal Gmail account.",
-  official: "Use only the Official Gmail account.",
-  both: "Use both Personal and Official Gmail accounts when the request involves email.",
+  personal: "Use only the Personal account for Google operations.",
+  official: "Use only the Official account for Google operations.",
+  both: "For read operations, use both connected accounts and label their results. For writes, use only an explicitly selected account.",
 } as const;
 
 type Account = keyof typeof ACCOUNT_INSTRUCTIONS;
@@ -125,6 +127,40 @@ export async function POST(request: Request) {
   }
 
   const userPrompt = `${ACCOUNT_INSTRUCTIONS[body.account]}\n\n${body.message}`;
+  const selectedLabels = body.account === "both" ? ["personal", "official"] as const : [body.account] as const;
+  const googleCapabilities: Record<string, Partial<Record<GoogleOperation, string>>> = {};
+  const googleProposalCapabilities: Record<string, Partial<Record<GoogleOperation, string>>> = {};
+  await Promise.all(selectedLabels.flatMap((label) => GOOGLE_OPERATIONS.map(async (operation) => {
+    if (["gmail.send", "calendar.create", "docs.create", "docs.insert"].includes(operation)) return;
+    try {
+      const capability = await issueGoogleCapability(authenticatedUser.id, label, [operation]);
+      googleCapabilities[label] ??= {};
+      googleCapabilities[label][operation] = capability;
+    } catch { /* Disconnected accounts and missing scopes stay unavailable to the workflow. */ }
+  })));
+  const confirmation = /^\s*confirm\s+([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\s*$/i.exec(body.message);
+  let approvedWrite: { label: "personal" | "official"; operation: GoogleOperation; payload: unknown } | null = null;
+  if (confirmation) {
+    try {
+      const approved = await consumeGoogleWriteApproval({ id: confirmation[1], userId: authenticatedUser.id, conversationId: conversation.id });
+      if (approved && body.account === approved.label) {
+        const capability = await issueGoogleCapability(authenticatedUser.id, approved.label, [approved.operation], 300, { [approved.operation]: JSON.stringify(approved.payload) });
+        googleCapabilities[approved.label] ??= {};
+        googleCapabilities[approved.label][approved.operation] = capability;
+        approvedWrite = approved;
+      }
+    } catch { /* Failed or expired confirmations are treated as ordinary chat input. */ }
+  }
+  if (!approvedWrite && body.account !== "both") {
+    const label = body.account;
+    await Promise.all(GOOGLE_OPERATIONS.filter((operation) => ["gmail.send", "calendar.create", "docs.create", "docs.insert"].includes(operation)).map(async (operation) => {
+      try {
+        const capability = await issueGoogleProposalCapability(authenticatedUser.id, label, operation, conversation.id);
+        googleProposalCapabilities[label] ??= {};
+        googleProposalCapabilities[label][operation] = capability;
+      } catch { /* Missing connection or scope means the operation is not available. */ }
+    }));
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), getTimeoutMs());
 
@@ -137,7 +173,12 @@ export async function POST(request: Request) {
         "X-N8N-Webhook-Secret": webhookSecret,
       },
       body: JSON.stringify({
-        sessionId: body.sessionId,
+        sessionId: conversation.id,
+        userId: authenticatedUser.id,
+        googleBrokerUrl: new URL("/api/google/broker", request.url).toString(),
+        googleCapabilities,
+        googleProposalCapabilities,
+        approvedWrite,
         user: userPrompt,
       }),
       signal: controller.signal,

@@ -1,8 +1,10 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 
 import { beginGoogleAuthorization } from "../../../../../lib/google-oauth";
 
 export async function GET() {
+  await connection();
+
   try {
     const authorization = await beginGoogleAuthorization();
     const response = NextResponse.redirect(authorization.url);
@@ -14,8 +16,8 @@ export async function GET() {
       path: "/",
     });
     return response;
-  } catch (error) {
-    console.error("Google authorization could not start.", error);
+  } catch {
+    console.error("Google authorization could not start.");
     return NextResponse.json({ error: "Google sign-in is not configured." }, { status: 503 });
   }
 }

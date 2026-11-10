@@ -21,8 +21,8 @@ export async function GET(request: Request) {
     await completeGoogleAuthorization(response, state, code);
     response.cookies.delete("google_oauth_state");
     return response;
-  } catch (caughtError) {
-    console.error("Google authorization callback was rejected.", caughtError);
+  } catch {
+    console.error("Google authorization callback was rejected.");
     return NextResponse.json({ error: "Google sign-in could not be completed." }, { status: 400 });
   }
 }

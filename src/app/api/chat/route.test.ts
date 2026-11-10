@@ -101,8 +101,13 @@ describe("POST /api/chat", () => {
           "X-N8N-Webhook-Secret": "test-webhook-secret",
         },
         body: JSON.stringify({
-          sessionId: "00000000-0000-4000-8000-000000000002",
-          user: "Use only the Personal Gmail account.\n\nCheck my emails",
+          sessionId: "00000000-0000-4000-8000-000000000001",
+          userId: "user-1",
+          googleBrokerUrl: "http://localhost/api/google/broker",
+          googleCapabilities: {},
+          googleProposalCapabilities: {},
+          approvedWrite: null,
+          user: "Use only the Personal account for Google operations.\n\nCheck my emails",
         }),
       }),
     );
@@ -129,9 +134,9 @@ describe("POST /api/chat", () => {
   });
 
   it.each([
-    ["personal", "Use only the Personal Gmail account."],
-    ["official", "Use only the Official Gmail account."],
-    ["both", "Use both Personal and Official Gmail accounts when the request involves email."],
+    ["personal", "Use only the Personal account for Google operations."],
+    ["official", "Use only the Official account for Google operations."],
+    ["both", "For read operations, use both connected accounts and label their results. For writes, use only an explicitly selected account."],
   ] as const)("preserves the %s account workflow instruction", async (account, instruction) => {
     vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
     vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
@@ -152,7 +157,12 @@ describe("POST /api/chat", () => {
       "http://localhost:5678/webhook/chat",
       expect.objectContaining({
         body: JSON.stringify({
-          sessionId: "00000000-0000-4000-8000-000000000002",
+          sessionId: "00000000-0000-4000-8000-000000000001",
+          userId: "user-1",
+          googleBrokerUrl: "http://localhost/api/google/broker",
+          googleCapabilities: {},
+          googleProposalCapabilities: {},
+          approvedWrite: null,
           user: `${instruction}\n\nCheck my emails`,
         }),
       }),
