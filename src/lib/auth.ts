@@ -185,9 +185,9 @@ export async function findGoogleAccount(userId: string, accountType: "personal" 
   return account ?? null;
 }
 
-export async function markGoogleAccountRevoked(userId: string, accountType: "personal" | "official") {
+export async function markGoogleAccountRevoked(userId: string, accountType: "personal" | "official", expectedAccountId?: string) {
   await getDatabase().update(googleAccounts).set({ status: "revoked", updatedAt: new Date() })
-    .where(and(eq(googleAccounts.userId, userId), eq(googleAccounts.accountType, accountType)));
+    .where(and(eq(googleAccounts.userId, userId), eq(googleAccounts.accountType, accountType), ...(expectedAccountId ? [eq(googleAccounts.id, expectedAccountId)] : [])));
 }
 
 export async function deleteGoogleAccount(userId: string, accountType: "personal" | "official") {

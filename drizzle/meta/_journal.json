@@ -43,6 +43,20 @@
       "when": 1794316802000,
       "tag": "0005_google_capabilities",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794316803000,
+      "tag": "0006_google_write_approval_account",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794316804000,
+      "tag": "0007_google_write_approval_conversation_owner",
+      "breakpoints": true
     }
   ]
 }

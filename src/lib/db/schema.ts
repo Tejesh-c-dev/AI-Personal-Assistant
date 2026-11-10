@@ -65,6 +65,7 @@ export const googleAccounts = pgTable(
   },
   (table) => [
     uniqueIndex("google_accounts_user_type_unique").on(table.userId, table.accountType),
+    uniqueIndex("google_accounts_owner_id_type_unique").on(table.userId, table.id, table.accountType),
     foreignKey({ columns: [table.userId, table.identityId], foreignColumns: [googleIdentities.userId, googleIdentities.id], name: "google_accounts_identity_owner_fk" }).onDelete("cascade"),
     check("google_accounts_type_check", sql`${table.accountType} in ('personal', 'official')`),
     check("google_accounts_status_check", sql`${table.status} in ('active', 'revoked')`),
@@ -110,6 +111,7 @@ export const conversations = pgTable(
   },
   (table) => [
     uniqueIndex("conversations_user_session_id_unique").on(table.userId, table.sessionId),
+    uniqueIndex("conversations_user_id_id_unique").on(table.userId, table.id),
     index("conversations_user_updated_at_idx").on(table.userId, table.updatedAt),
     index("conversations_updated_at_idx").on(table.updatedAt),
     check("conversations_account_check", sql`${table.account} in ('personal', 'official', 'both')`),
@@ -121,12 +123,13 @@ export const googleWriteApprovals = pgTable("google_write_approvals", {
   userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   conversationId: uuid("conversation_id").notNull().references(() => conversations.id, { onDelete: "cascade" }),
   accountLabel: text("account_label").notNull(),
+  googleAccountId: uuid("google_account_id").notNull(),
   operation: text("operation").notNull(),
   payload: text("payload").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   consumedAt: timestamp("consumed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-}, (table) => [index("google_write_approvals_user_conversation_idx").on(table.userId, table.conversationId)]);
+}, (table) => [index("google_write_approvals_user_conversation_idx").on(table.userId, table.conversationId), foreignKey({ columns: [table.userId, table.conversationId], foreignColumns: [conversations.userId, conversations.id], name: "google_write_approvals_conversation_owner_fk" }).onDelete("cascade"), foreignKey({ columns: [table.userId, table.googleAccountId, table.accountLabel], foreignColumns: [googleAccounts.userId, googleAccounts.id, googleAccounts.accountType], name: "google_write_approvals_account_owner_label_fk" }).onDelete("cascade"), check("google_write_approvals_label_check", sql`${table.accountLabel} in ('personal', 'official')`)]);
 
 export const messages = pgTable(
   "messages",

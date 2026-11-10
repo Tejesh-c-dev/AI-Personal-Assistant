@@ -19,24 +19,24 @@ export async function POST(request: Request) {
       if (!["gmail.send", "calendar.create", "docs.create", "docs.insert"].includes(operation)) throw new GoogleAuthorizationError("INVALID_REQUEST");
       if (typeof input !== "object" || input === null || Array.isArray(input)) throw new GoogleAuthorizationError("INVALID_REQUEST");
       const proposal = await verifyGoogleProposalCapability(capability, operation as GoogleOperation);
-      const stored = await createGoogleWriteApproval({ userId: proposal.userId, conversationId: proposal.conversationId, label: proposal.label, operation: operation as GoogleOperation, payload: input });
+      const stored = await createGoogleWriteApproval({ userId: proposal.userId, conversationId: proposal.conversationId, label: proposal.label, googleAccountId: proposal.accountId, operation: operation as GoogleOperation, payload: input });
       return NextResponse.json({ result: { ...stored, confirmation: `Reply CONFIRM ${stored.approvalId} in a separate message to approve these exact details.` } }, { status: 201 });
     }
     if (action !== "execute") throw new GoogleAuthorizationError("INVALID_REQUEST");
-    const { userId, label } = await verifyAnyGoogleCapability(capability, operation as GoogleOperation, input);
+    const { userId, label, accountId } = await verifyAnyGoogleCapability(capability, operation as GoogleOperation, input);
     let result: unknown;
     const data = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
     switch (operation as GoogleOperation) {
-      case "gmail.search": result = await googleBroker.searchGmail(userId, label, String(data.query ?? ""), Number(data.maxResults ?? 20)); break;
-      case "gmail.get": result = await googleBroker.getGmailMessage(userId, label, String(data.messageId ?? "")); break;
-      case "gmail.send": result = await googleBroker.sendGmail(userId, label, { to: String(data.to ?? ""), subject: String(data.subject ?? ""), body: String(data.body ?? "") }); break;
-      case "calendar.list": result = await googleBroker.listCalendarEvents(userId, label, String(data.calendarId ?? "primary"), typeof data.timeMin === "string" ? data.timeMin : undefined, typeof data.timeMax === "string" ? data.timeMax : undefined); break;
-      case "calendar.get": result = await googleBroker.getCalendarEvent(userId, label, String(data.eventId ?? ""), String(data.calendarId ?? "primary")); break;
-      case "calendar.create": result = await googleBroker.createCalendarEvent(userId, label, data.event as Record<string, unknown>, String(data.calendarId ?? "primary")); break;
-      case "docs.get": result = await googleBroker.getDocument(userId, label, String(data.documentId ?? "")); break;
-      case "docs.create": result = await googleBroker.createDocument(userId, label, String(data.title ?? "")); break;
-      case "docs.insert": result = await googleBroker.insertDocumentText(userId, label, String(data.documentId ?? ""), String(data.text ?? "")); break;
-      case "docs.export": result = await googleBroker.exportDocument(userId, label, String(data.documentId ?? ""), String(data.mimeType ?? "text/plain")); break;
+      case "gmail.search": result = await googleBroker.searchGmail(userId, label, String(data.query ?? ""), Number(data.maxResults ?? 20), accountId); break;
+      case "gmail.get": result = await googleBroker.getGmailMessage(userId, label, String(data.messageId ?? ""), accountId); break;
+      case "gmail.send": result = await googleBroker.sendGmail(userId, label, { to: String(data.to ?? ""), subject: String(data.subject ?? ""), body: String(data.body ?? "") }, accountId); break;
+      case "calendar.list": result = await googleBroker.listCalendarEvents(userId, label, String(data.calendarId ?? "primary"), typeof data.timeMin === "string" ? data.timeMin : undefined, typeof data.timeMax === "string" ? data.timeMax : undefined, accountId); break;
+      case "calendar.get": result = await googleBroker.getCalendarEvent(userId, label, String(data.eventId ?? ""), String(data.calendarId ?? "primary"), accountId); break;
+      case "calendar.create": result = await googleBroker.createCalendarEvent(userId, label, data.event as Record<string, unknown>, String(data.calendarId ?? "primary"), accountId); break;
+      case "docs.get": result = await googleBroker.getDocument(userId, label, String(data.documentId ?? ""), accountId); break;
+      case "docs.create": result = await googleBroker.createDocument(userId, label, String(data.title ?? ""), accountId); break;
+      case "docs.insert": result = await googleBroker.insertDocumentText(userId, label, String(data.documentId ?? ""), String(data.text ?? ""), accountId); break;
+      case "docs.export": result = await googleBroker.exportDocument(userId, label, String(data.documentId ?? ""), String(data.mimeType ?? "text/plain"), accountId); break;
     }
     return NextResponse.json({ result });
   } catch (error) {

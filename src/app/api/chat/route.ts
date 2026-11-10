@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { databaseErrorResponse, unauthorizedResponse } from "../../../lib/api-errors";
 import { getCurrentUser } from "../../../lib/auth";
-import { issueGoogleCapability, issueGoogleProposalCapability, GOOGLE_OPERATIONS, type GoogleOperation } from "../../../lib/google-api";
+import { GoogleAuthorizationError, issueGoogleCapability, issueGoogleProposalCapability, GOOGLE_OPERATIONS, type GoogleOperation } from "../../../lib/google-api";
 import { consumeGoogleWriteApproval } from "../../../lib/google-write-approvals";
 import {
   appendMessage,
@@ -14,6 +14,7 @@ import {
 } from "../../../lib/conversations";
 
 const DEFAULT_TIMEOUT_MS = 150_000;
+export const maxDuration = 180;
 const MAX_MESSAGE_LENGTH = 4_000;
 const ACTIVE_CONVERSATION_COOKIE = "active_conversation_id";
 const ACCOUNT_INSTRUCTIONS = {
@@ -139,17 +140,22 @@ export async function POST(request: Request) {
     } catch { /* Disconnected accounts and missing scopes stay unavailable to the workflow. */ }
   })));
   const confirmation = /^\s*confirm\s+([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\s*$/i.exec(body.message);
-  let approvedWrite: { label: "personal" | "official"; operation: GoogleOperation; payload: unknown } | null = null;
+  let approvedWrite: { label: "personal" | "official"; accountId: string; operation: GoogleOperation; payload: unknown } | null = null;
   if (confirmation) {
     try {
       const approved = await consumeGoogleWriteApproval({ id: confirmation[1], userId: authenticatedUser.id, conversationId: conversation.id });
       if (approved && body.account === approved.label) {
-        const capability = await issueGoogleCapability(authenticatedUser.id, approved.label, [approved.operation], 300, { [approved.operation]: JSON.stringify(approved.payload) });
+        const capability = await issueGoogleCapability(authenticatedUser.id, approved.label, [approved.operation], 300, { [approved.operation]: JSON.stringify(approved.payload) }, approved.accountId);
         googleCapabilities[approved.label] ??= {};
         googleCapabilities[approved.label][approved.operation] = capability;
         approvedWrite = approved;
       }
-    } catch { /* Failed or expired confirmations are treated as ordinary chat input. */ }
+    } catch (error) {
+      if (error instanceof GoogleAuthorizationError && error.code === "RECONNECT_REQUIRED") {
+        return NextResponse.json({ error: error.message, code: error.code }, { status: 403 });
+      }
+      /* Failed or expired confirmations are treated as ordinary chat input. */
+    }
   }
   if (!approvedWrite && body.account !== "both") {
     const label = body.account;
