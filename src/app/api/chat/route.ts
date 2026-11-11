@@ -177,6 +177,7 @@ export async function POST(request: Request) {
       headers: {
         "Content-Type": "application/json",
         "X-N8N-Webhook-Secret": webhookSecret,
+        "ngrok-skip-browser-warning": "true",
       },
       body: JSON.stringify({
         sessionId: conversation.id,
