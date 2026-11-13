@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 vi.mock("../../../lib/auth", () => ({
   getCurrentUser: vi.fn().mockResolvedValue({ id: "user-1" }),
+  listGoogleAccounts: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("../../../lib/conversations", () => ({
   appendMessage: vi.fn().mockResolvedValue({}),
@@ -14,6 +15,7 @@ vi.mock("../../../lib/conversations", () => ({
   }),
   createConversationTitle: (value: string) => value.trim().slice(0, 80),
   findConversationBySessionId: vi.fn().mockResolvedValue(null),
+  isAccount: (value: unknown) => typeof value === "string" && (value === "both" || value === "personal" || value === "official" || (/^[a-z0-9 \-]{1,50}$/.test(value.trim().toLowerCase()) && value.trim().toLowerCase() !== "unknown")),
   isUuid: (value: unknown) => typeof value === "string" && value.length === 36,
   updateConversation: vi.fn().mockResolvedValue({
     id: "00000000-0000-4000-8000-000000000001",
@@ -99,6 +101,7 @@ describe("POST /api/chat", () => {
         headers: {
           "Content-Type": "application/json",
           "X-N8N-Webhook-Secret": "test-webhook-secret",
+          "ngrok-skip-browser-warning": "true",
         },
         body: JSON.stringify({
           sessionId: "00000000-0000-4000-8000-000000000001",

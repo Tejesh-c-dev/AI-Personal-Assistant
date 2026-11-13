@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { AccountSelector, type Account } from "@/components/chat/account-selector";
+import { AccountSelector, type Account, type AccountItem } from "@/components/chat/account-selector";
 import type { ConversationSummary } from "@/components/chat/conversation-api";
 import { Icon } from "@/components/ui/icons";
 import type { User } from "@/lib/db/schema";
@@ -22,6 +22,9 @@ type SidebarProps = {
   onDeleteConversation: (conversation: ConversationSummary) => void;
   onToggleCollapse: () => void;
   user: Pick<User, "name" | "email" | "picture">;
+  onOpenSettings?: () => void;
+  accounts?: AccountItem[];
+  isAccountsLoading?: boolean;
 };
 
 export function Sidebar({
@@ -38,6 +41,9 @@ export function Sidebar({
   onDeleteConversation,
   onToggleCollapse,
   user,
+  onOpenSettings,
+  accounts,
+  isAccountsLoading,
 }: SidebarProps) {
   const router = useRouter();
   const [search, setSearch] = useState("");
@@ -84,8 +90,24 @@ export function Sidebar({
         </section>
 
         <div className={`${isCollapsed ? "space-y-3" : "border-t border-slate-100 pt-4"}`}>
-          <button aria-label="Open settings" className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-xs font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 ${isCollapsed ? "justify-center" : ""}`} type="button"><Icon name="settings" />{!isCollapsed && "Settings"}</button>
-          {!isCollapsed && <AccountSelector onChange={onAccountChange} value={account} />}
+          <button
+            aria-label="Open settings"
+            className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-xs font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 ${isCollapsed ? "justify-center" : ""}`}
+            onClick={onOpenSettings}
+            type="button"
+          >
+            <Icon name="settings" />
+            {!isCollapsed && "Settings"}
+          </button>
+          {!isCollapsed && (
+            <AccountSelector
+              accounts={accounts}
+              disabled={isAccountsLoading}
+              isLoading={isAccountsLoading}
+              onChange={onAccountChange}
+              value={account}
+            />
+          )}
           {!isCollapsed && <div className="mt-3 rounded-xl border border-slate-200/80 bg-white p-2">
             <div className="flex items-center gap-2">
               <div className="flex size-8 items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-700">{user.name.slice(0, 2).toUpperCase()}</div>

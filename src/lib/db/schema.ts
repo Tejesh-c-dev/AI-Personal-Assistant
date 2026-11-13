@@ -56,7 +56,7 @@ export const googleAccounts = pgTable(
     id: uuid("id").defaultRandom().primaryKey(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     identityId: uuid("identity_id").notNull(),
-    accountType: text("account_type").notNull(),
+    label: text("label").notNull(),
     refreshTokenCiphertext: text("refresh_token_ciphertext").notNull(),
     grantedScopes: text("granted_scopes").array().notNull().default(sql`'{}'::text[]`),
     status: text("status").notNull().default("active"),
@@ -64,11 +64,20 @@ export const googleAccounts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    uniqueIndex("google_accounts_user_type_unique").on(table.userId, table.accountType),
-    uniqueIndex("google_accounts_owner_id_type_unique").on(table.userId, table.id, table.accountType),
+    // Case-insensitive unique label per user: functional index on (user_id, LOWER(label)).
+    // This is the authoritative uniqueness guard for the rename path; created by migration 0008.
+    uniqueIndex("google_accounts_user_label_ci_unique").using("btree", table.userId, sql`LOWER(${table.label})`),
+    // Composite unique index on (user_id, id, label) required as the referenced key
+    // for the google_write_approvals composite FK (approval must reference the same label value).
+    uniqueIndex("google_accounts_owner_id_label_unique").on(table.userId, table.id, table.label),
     foreignKey({ columns: [table.userId, table.identityId], foreignColumns: [googleIdentities.userId, googleIdentities.id], name: "google_accounts_identity_owner_fk" }).onDelete("cascade"),
-    check("google_accounts_type_check", sql`${table.accountType} in ('personal', 'official')`),
     check("google_accounts_status_check", sql`${table.status} in ('active', 'revoked')`),
+    // Format and normalization CHECK mirroring validateAccountLabel() in src/lib/auth.ts:
+    // 1-50 chars, trimmed, only lowercase alphanumeric, spaces, and hyphens, and cannot be 'both'.
+    check(
+      "google_accounts_label_check",
+      sql`${table.label} <> 'both' and length(${table.label}) between 1 and 50 and ${table.label} = trim(${table.label}) and ${table.label} ~ '^[a-z0-9 \\-]{1,50}$'`,
+    ),
   ],
 );
 
@@ -80,15 +89,15 @@ export const oauthTransactions = pgTable(
     codeVerifier: text("code_verifier").notNull(),
     operation: text("operation").notNull().default("login"),
     initiatingUserId: uuid("initiating_user_id").references(() => users.id, { onDelete: "cascade" }),
-    accountType: text("account_type"),
+    accountLabel: text("account_label"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
     index("oauth_transactions_expires_at_idx").on(table.expiresAt),
     check("oauth_transactions_operation_check", sql`${table.operation} in ('login', 'connect')`),
-    check("oauth_transactions_account_type_check", sql`${table.accountType} is null or ${table.accountType} in ('personal', 'official')`),
-    check("oauth_transactions_connect_user_check", sql`(${table.operation} = 'login' and ${table.initiatingUserId} is null and ${table.accountType} is null) or (${table.operation} = 'connect' and ${table.initiatingUserId} is not null and ${table.accountType} is not null)`),
+    check("oauth_transactions_account_label_check", sql`${table.accountLabel} is null or (length(${table.accountLabel}) between 1 and 50)`),
+    check("oauth_transactions_connect_user_check", sql`(${table.operation} = 'login' and ${table.initiatingUserId} is null and ${table.accountLabel} is null) or (${table.operation} = 'connect' and ${table.initiatingUserId} is not null and ${table.accountLabel} is not null)`),
   ],
 );
 
@@ -114,7 +123,14 @@ export const conversations = pgTable(
     uniqueIndex("conversations_user_id_id_unique").on(table.userId, table.id),
     index("conversations_user_updated_at_idx").on(table.userId, table.updatedAt),
     index("conversations_updated_at_idx").on(table.updatedAt),
-    check("conversations_account_check", sql`${table.account} in ('personal', 'official', 'both')`),
+    // Format-only CHECK mirroring isAccount() in src/lib/conversations.ts.
+    // Accepts 'both' (sentinel) and labels matching ^[a-z0-9 \-]{1,50}$.
+    // Does NOT prove the label belongs to the conversation owner — that is an
+    // application-layer concern. No normalized account-reference redesign here.
+    check(
+      "conversations_account_check",
+      sql`${table.account} = 'both' OR (length(${table.account}) BETWEEN 1 AND 50 AND ${table.account} ~ '^[a-z0-9 \\-]{1,50}$')`,
+    ),
   ],
 );
 
@@ -129,7 +145,7 @@ export const googleWriteApprovals = pgTable("google_write_approvals", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   consumedAt: timestamp("consumed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-}, (table) => [index("google_write_approvals_user_conversation_idx").on(table.userId, table.conversationId), foreignKey({ columns: [table.userId, table.conversationId], foreignColumns: [conversations.userId, conversations.id], name: "google_write_approvals_conversation_owner_fk" }).onDelete("cascade"), foreignKey({ columns: [table.userId, table.googleAccountId, table.accountLabel], foreignColumns: [googleAccounts.userId, googleAccounts.id, googleAccounts.accountType], name: "google_write_approvals_account_owner_label_fk" }).onDelete("cascade"), check("google_write_approvals_label_check", sql`${table.accountLabel} in ('personal', 'official')`)]);
+}, (table) => [index("google_write_approvals_user_conversation_idx").on(table.userId, table.conversationId), foreignKey({ columns: [table.userId, table.conversationId], foreignColumns: [conversations.userId, conversations.id], name: "google_write_approvals_conversation_owner_fk" }).onDelete("cascade"), foreignKey({ columns: [table.userId, table.googleAccountId, table.accountLabel], foreignColumns: [googleAccounts.userId, googleAccounts.id, googleAccounts.label], name: "google_write_approvals_account_owner_label_fk" }).onDelete("cascade").onUpdate("cascade"), check("google_write_approvals_label_check", sql`length(${table.accountLabel}) between 1 and 50`)]);
 
 export const messages = pgTable(
   "messages",

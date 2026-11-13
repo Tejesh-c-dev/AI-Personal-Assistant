@@ -1,6 +1,6 @@
 import type { Account } from "@/components/chat/account-selector";
 
-export type ApiAccount = "personal" | "official" | "both";
+export type ApiAccount = string;
 
 export type ChatRequest = {
   message: string;

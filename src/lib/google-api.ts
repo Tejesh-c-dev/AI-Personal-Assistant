@@ -8,7 +8,7 @@ import { findGoogleAccount, getGoogleConfig, markGoogleAccountRevoked } from "./
 import { getDatabase } from "./db";
 import { googleCapabilities } from "./db/schema";
 
-export type GoogleAccountLabel = "personal" | "official";
+export type GoogleAccountLabel = string;
 export const GOOGLE_OPERATIONS = ["gmail.search", "gmail.get", "gmail.send", "calendar.list", "calendar.get", "calendar.create", "docs.get", "docs.create", "docs.insert", "docs.export"] as const;
 export type GoogleOperation = typeof GOOGLE_OPERATIONS[number];
 export type GoogleReadOperation = Extract<GoogleOperation, "gmail.search" | "gmail.get" | "calendar.list" | "calendar.get" | "docs.get" | "docs.export">;
@@ -118,7 +118,7 @@ async function consumeCapabilityNonce(nonce: string) {
 export async function verifyGoogleProposalCapability(token: string, operation: GoogleOperation): Promise<{ userId: string; label: GoogleAccountLabel; conversationId: string; accountId: string }> {
   try {
     const { payload } = await jwtVerify(token, capabilityKey(), { issuer: CAPABILITY_ISSUER });
-    if (payload.purpose !== "propose" || payload.operation !== operation || typeof payload.sub !== "string" || typeof payload.conversationId !== "string" || typeof payload.nonce !== "string" || typeof payload.accountId !== "string" || typeof payload.accountIdentityId !== "string" || typeof payload.accountVersion !== "number" || (payload.label !== "personal" && payload.label !== "official") || !writes.has(operation)) throw new Error();
+    if (payload.purpose !== "propose" || payload.operation !== operation || typeof payload.sub !== "string" || typeof payload.conversationId !== "string" || typeof payload.nonce !== "string" || typeof payload.accountId !== "string" || typeof payload.accountIdentityId !== "string" || typeof payload.accountVersion !== "number" || typeof payload.label !== "string" || !payload.label || !writes.has(operation)) throw new Error();
     const activeAccount = await findGoogleAccount(payload.sub, payload.label);
     if (!activeAccount || activeAccount.status !== "active" || activeAccount.id !== payload.accountId || activeAccount.identityId !== payload.accountIdentityId || googleAccountVersion(activeAccount) !== payload.accountVersion) throw new GoogleAuthorizationError("RECONNECT_REQUIRED");
     await consumeCapabilityNonce(payload.nonce);
@@ -146,7 +146,7 @@ export async function verifyAnyGoogleCapability(token: string, operation: Google
   try {
     const { payload } = await jwtVerify(token, capabilityKey(), { issuer: CAPABILITY_ISSUER });
     const label = payload.label;
-    if (typeof payload.sub !== "string" || (label !== "personal" && label !== "official") || !Array.isArray(payload.operations) || !payload.operations.includes(operation)) throw new Error();
+    if (typeof payload.sub !== "string" || typeof label !== "string" || !label || !Array.isArray(payload.operations) || !payload.operations.includes(operation)) throw new Error();
     if (writes.has(operation) && (typeof input !== "object" || input === null)) throw new Error();
     await verifyGoogleCapability(token, payload.sub, label, operation, input);
     if (typeof payload.accountId !== "string") throw new Error();

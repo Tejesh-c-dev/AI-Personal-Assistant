@@ -5,16 +5,20 @@ import { and, asc, desc, eq } from "drizzle-orm";
 import { getDatabase } from "./db";
 import { conversations, messages, type Conversation, type Message } from "./db/schema";
 
-export const ACCOUNT_VALUES = ["personal", "official", "both"] as const;
+export const BOTH_SENTINEL = "both" as const;
+export type Account = string;
+
+export function isAccount(value: unknown): value is Account {
+  if (typeof value !== "string" || !value.trim()) return false;
+  if (value === BOTH_SENTINEL) return true;
+  // Any valid account label: 1-50 chars, lowercase letters/digits/hyphens/spaces
+  return /^[a-z0-9 \-]{1,50}$/.test(value.trim().toLowerCase());
+}
+
 export const MESSAGE_ROLE_VALUES = ["user", "assistant"] as const;
-export type Account = (typeof ACCOUNT_VALUES)[number];
 export type MessageRole = (typeof MESSAGE_ROLE_VALUES)[number];
 
 export type ConversationSummary = Pick<Conversation, "id" | "sessionId" | "title" | "account" | "createdAt" | "updatedAt">;
-
-export function isAccount(value: unknown): value is Account {
-  return typeof value === "string" && ACCOUNT_VALUES.includes(value as Account);
-}
 
 export function isMessageRole(value: unknown): value is MessageRole {
   return typeof value === "string" && MESSAGE_ROLE_VALUES.includes(value as MessageRole);

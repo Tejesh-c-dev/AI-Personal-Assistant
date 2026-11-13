@@ -12,23 +12,28 @@ vi.mock("next/headers", () => ({
   }),
 }));
 
-vi.mock("../../../lib/conversations", () => ({
-  createConversation: vi.fn().mockResolvedValue({
-    id: "00000000-0000-4000-8000-000000000001",
-    sessionId: "00000000-0000-4000-8000-000000000002",
-    title: "Check my emails",
-    account: "personal",
-    createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
-  }),
-  listConversations: vi.fn().mockResolvedValue([]),
-  getConversation: vi.fn().mockResolvedValue(null),
-  updateConversation: vi.fn().mockResolvedValue(null),
-  deleteConversation: vi.fn().mockResolvedValue(false),
-  createConversationTitle: (value: string) => value.trim().slice(0, 80),
-  isAccount: (value: unknown) => value === "personal" || value === "official" || value === "both",
-  isUuid: (value: unknown) => typeof value === "string" && value.length === 36,
-}));
+vi.mock("../../../lib/conversations", async (importActual) => {
+  const actual = await importActual<typeof import("../../../lib/conversations")>();
+  return {
+    createConversation: vi.fn().mockResolvedValue({
+      id: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      title: "Check my emails",
+      account: "personal",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    }),
+    listConversations: vi.fn().mockResolvedValue([]),
+    getConversation: vi.fn().mockResolvedValue(null),
+    updateConversation: vi.fn().mockResolvedValue(null),
+    deleteConversation: vi.fn().mockResolvedValue(false),
+    // Use the real pure-function implementations so the mock reflects actual
+    // dynamic-label validation behaviour (not a hardcoded enum whitelist).
+    createConversationTitle: actual.createConversationTitle,
+    isAccount: actual.isAccount,
+    isUuid: actual.isUuid,
+  };
+});
 
 import { POST, GET } from "./route";
 import { DELETE, GET as GET_ITEM, PATCH } from "./[id]/route";
@@ -68,11 +73,28 @@ describe("conversation API routes", () => {
   });
 
   it("lists conversations with the active conversation ID", async () => {
+    vi.mocked(conversationRepository.listConversations).mockResolvedValueOnce([
+      {
+        id: validId,
+        sessionId: "00000000-0000-4000-8000-000000000002",
+        title: "Check my emails",
+        account: "personal",
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+    ]);
     const response = await GET();
-    await expect(response.json()).resolves.toEqual({
-      conversations: [],
-      activeConversationId: validId,
-    });
+    const data = await response.json();
+    expect(data.activeConversationId).toBe(validId);
+    expect(data.conversations).toHaveLength(1);
+  });
+
+  it("clears the active conversation ID if it does not belong to the user", async () => {
+    vi.mocked(conversationRepository.listConversations).mockResolvedValueOnce([]);
+    const response = await GET();
+    const data = await response.json();
+    expect(data.activeConversationId).toBeNull();
+    expect(data.conversations).toHaveLength(0);
   });
 
   it("rejects invalid conversation input", async () => {

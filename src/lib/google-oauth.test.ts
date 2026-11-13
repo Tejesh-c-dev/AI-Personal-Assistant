@@ -58,14 +58,14 @@ describe("Google OAuth", () => {
       .mockReturnValueOnce("connect-state")
       .mockReturnValueOnce("connect-nonce")
       .mockReturnValueOnce("connect-verifier");
-    await beginGoogleAuthorization([], { operation: "connect", initiatingUserId: "user-1", accountType: "official" });
+    await beginGoogleAuthorization([], { operation: "connect", initiatingUserId: "user-1", accountLabel: "official" });
     expect(auth.createOAuthTransaction).toHaveBeenLastCalledWith({
       state: "connect-state",
       nonce: "connect-nonce",
       codeVerifier: "connect-verifier",
       operation: "connect",
       initiatingUserId: "user-1",
-      accountType: "official",
+      accountLabel: "official",
     });
   });
 
@@ -82,7 +82,7 @@ describe("Google OAuth", () => {
     vi.stubEnv("GOOGLE_TOKEN_ENCRYPTION_KEY", Buffer.alloc(32, 9).toString("base64"));
     vi.mocked(auth.getGoogleConfig).mockReturnValue({ clientId: "client-id", clientSecret: "client-secret", redirectUri: "http://localhost/callback" });
     vi.mocked(auth.consumeOAuthTransaction).mockResolvedValueOnce({
-      operation: "connect", initiatingUserId: "initiator", accountType: "official", codeVerifier: "pkce-verifier", nonce: "nonce",
+      operation: "connect", initiatingUserId: "initiator", accountLabel: "official", codeVerifier: "pkce-verifier", nonce: "nonce",
     } as never);
     vi.mocked(jose.jwtVerify).mockResolvedValue({ payload: { nonce: "nonce", sub: "google-subject", email: "person@example.com", email_verified: true } } as never);
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({ id_token: "signed-id-token", refresh_token: "plain-refresh-token" }), { status: 200 }));
@@ -93,7 +93,7 @@ describe("Google OAuth", () => {
     expect(body.get("code_verifier")).toBe("pkce-verifier");
     expect(auth.consumeOAuthTransaction).toHaveBeenCalledWith("state");
     expect(auth.saveGoogleAccount).toHaveBeenCalledWith(expect.objectContaining({
-      userId: "initiator", accountType: "official", googleSubject: "google-subject", email: "person@example.com",
+      userId: "initiator", label: "official", googleSubject: "google-subject", email: "person@example.com",
     }));
     const persisted = vi.mocked(auth.saveGoogleAccount).mock.calls.at(-1)?.[0].refreshTokenCiphertext;
     expect(persisted).toBeDefined();
@@ -104,7 +104,7 @@ describe("Google OAuth", () => {
   it("rejects a connect callback without a refresh token", async () => {
     vi.mocked(auth.getGoogleConfig).mockReturnValue({ clientId: "client-id", clientSecret: "client-secret", redirectUri: "http://localhost/callback" });
     vi.mocked(auth.consumeOAuthTransaction).mockResolvedValueOnce({
-      operation: "connect", initiatingUserId: "initiator", accountType: "personal", codeVerifier: "verifier", nonce: "nonce",
+      operation: "connect", initiatingUserId: "initiator", accountLabel: "personal", codeVerifier: "verifier", nonce: "nonce",
     } as never);
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({ id_token: "signed-id-token" }), { status: 200 }));
 
@@ -117,13 +117,13 @@ describe("Google OAuth", () => {
     vi.stubEnv("GOOGLE_TOKEN_ENCRYPTION_KEY", Buffer.alloc(32, 9).toString("base64"));
     vi.mocked(auth.getGoogleConfig).mockReturnValue({ clientId: "client-id", clientSecret: "client-secret", redirectUri: "http://localhost/callback" });
     vi.mocked(auth.consumeOAuthTransaction).mockResolvedValueOnce({
-      operation: "connect", initiatingUserId: "initiator", accountType: "personal", codeVerifier: "verifier", nonce: "nonce",
+      operation: "connect", initiatingUserId: "initiator", accountLabel: "personal", codeVerifier: "verifier", nonce: "nonce",
     } as never);
     vi.mocked(jose.jwtVerify).mockResolvedValue({ payload: { nonce: "nonce", sub: "google-subject", email: "person@example.com", email_verified: true } } as never);
     vi.mocked(auth.saveGoogleAccount).mockRejectedValueOnce(new Error("GOOGLE_IDENTITY_ALREADY_LINKED"));
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({ id_token: "signed-id-token", refresh_token: "refresh" }), { status: 200 }));
 
     await expect(completeGoogleAuthorization({} as never, "state", "code")).rejects.toThrow("GOOGLE_IDENTITY_ALREADY_LINKED");
-    expect(auth.saveGoogleAccount).toHaveBeenCalledWith(expect.objectContaining({ userId: "initiator", accountType: "personal" }));
+    expect(auth.saveGoogleAccount).toHaveBeenCalledWith(expect.objectContaining({ userId: "initiator", label: "personal" }));
   });
 });

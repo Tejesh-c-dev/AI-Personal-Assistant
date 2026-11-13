@@ -63,14 +63,31 @@ async function rejected(label, query) {
 try {
   await client.connect();
   connected = true;
-  const identity = await client.query("select current_database() as database, inet_server_addr()::text as address, current_user as role");
+  const identity = await client.query("select current_database() as database, host(inet_server_addr()) as address, current_user as role");
   const db = identity.rows[0];
   console.log(`PostgreSQL target: database=${db.database}, address=${db.address ?? "local socket"}, role=${db.role}`);
   if (db.database !== "ai_personal_assistant_test" || db.role !== "postgres" || !db.address || (!/^127(?:\.\d{1,3}){3}$/.test(db.address) && db.address !== "::1")) throw new Error("Connected server identity does not match the approved loopback test target.");
   targetVerified = true;
 
   await client.query("create table if not exists public._ai_personal_assistant_test_migrations (name text primary key, applied_at timestamptz not null default now())");
-  for (let n = 0; n <= 7; n++) {
+  // If drizzle-kit already applied all migrations, register each SQL file in our own tracker
+  // so the loop below skips re-applying them (re-applying would fail with "already exists").
+  const drizzleSchemaExists = (await client.query(
+    "select 1 from information_schema.tables where table_schema='drizzle' and table_name='__drizzle_migrations' limit 1"
+  )).rowCount > 0;
+  if (drizzleSchemaExists) {
+    const drizzleCount = (await client.query("select count(*) as c from drizzle.__drizzle_migrations")).rows[0].c;
+    if (Number(drizzleCount) >= 9) {
+      // All 9 migrations (0000-0008) are recorded in drizzle journal; mark them applied in our tracker.
+      const files = await readdir(resolve("drizzle"));
+      for (let n = 0; n <= 8; n++) {
+        const prefixNumber = String(n).padStart(4, "0");
+        const migration = files.find((f) => f.startsWith(`${prefixNumber}_`) && f.endsWith(".sql"));
+        if (migration) await client.query("insert into public._ai_personal_assistant_test_migrations(name) values($1) on conflict do nothing", [migration]);
+      }
+    }
+  }
+  for (let n = 0; n <= 8; n++) {
     const prefixNumber = String(n).padStart(4, "0");
     const migration = (await readdir(resolve("drizzle"))).find((file) => file.startsWith(`${prefixNumber}_`) && file.endsWith(".sql"));
     if (!migration) throw new Error(`Migration ${prefixNumber} is missing.`);
@@ -101,12 +118,12 @@ try {
   synthetic.conversations.push(ca);
   const cb = (await client.query("insert into conversations(user_id,session_id,title,account) values($1,gen_random_uuid(),'test','personal') returning id", [b])).rows[0].id;
   synthetic.conversations.push(cb);
-  const aa = (await client.query("insert into google_accounts(user_id,identity_id,account_type,refresh_token_ciphertext) values($1,$2,'personal','synthetic') returning id", [a, ia])).rows[0].id;
+  const aa = (await client.query("insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext) values($1,$2,'personal','synthetic') returning id", [a, ia])).rows[0].id;
   synthetic.accounts.push(aa);
-  const ab = (await client.query("insert into google_accounts(user_id,identity_id,account_type,refresh_token_ciphertext) values($1,$2,'personal','synthetic') returning id", [b, ib])).rows[0].id;
+  const ab = (await client.query("insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext) values($1,$2,'personal','synthetic') returning id", [b, ib])).rows[0].id;
   synthetic.accounts.push(ab);
   executed.push("same-owner conversation, identity, account inserts: succeeded");
-  await rejected("cross-owner identity/account association", () => client.query("insert into google_accounts(user_id,identity_id,account_type,refresh_token_ciphertext) values($1,$2,'official','synthetic')", [a, ib]));
+  await rejected("cross-owner identity/account association", () => client.query("insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext) values($1,$2,'official','synthetic')", [a, ib]));
   const approvalSql = "insert into google_write_approvals(user_id,conversation_id,account_label,google_account_id,operation,payload,expires_at) values($1,$2,'personal',$3,'gmail.send','{}',now()+interval '5 minutes')";
   const initialApproval = await client.query(approvalSql + " returning id", [a, ca, aa]);
   synthetic.approvals.push(initialApproval.rows[0].id);
@@ -128,6 +145,70 @@ try {
   const replay = await client.query("update google_capabilities set consumed_at=now() where nonce=$1 and consumed_at is null and expires_at>now() returning nonce", [nonce]);
   if (consumed.rowCount !== 1 || replay.rowCount !== 0) throw new Error("Capability nonce replay was not rejected.");
   executed.push("capability nonce: consumed once; replay rejected");
+  // ── 0008: Dynamic account label constraints ──────────────────────────────
+  // Dynamic label creation: any compliant label is accepted
+  const aDynAcct = (await client.query(
+    "insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext) values($1,$2,'my-work-label','synthetic') returning id",
+    [a, ia]
+  )).rows[0].id;
+  synthetic.accounts.push(aDynAcct);
+  executed.push("dynamic label creation ('my-work-label'): succeeded");
+
+  // Case-insensitive duplicate rejection (google_accounts_user_label_ci_unique)
+  await rejected("duplicate label case-insensitive (MY-WORK-LABEL)", () =>
+    client.query(
+      "insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext) values($1,$2,'MY-WORK-LABEL','synthetic')",
+      [a, ia]
+    )
+  );
+
+  // 'both' is rejected on google_accounts (google_accounts_label_check)
+  await rejected("label='both' rejected on google_accounts", () =>
+    client.query(
+      "insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext) values($1,$2,'both','synthetic')",
+      [a, ia]
+    )
+  );
+
+  // conversations.account accepts 'both' (sentinel) and dynamic labels
+  const convBoth = (await client.query(
+    "insert into conversations(user_id,session_id,title,account) values($1,gen_random_uuid(),'test','both') returning id",
+    [a]
+  )).rows[0].id;
+  synthetic.conversations.push(convBoth);
+  executed.push("conversations.account='both': accepted");
+
+  const convDyn = (await client.query(
+    "insert into conversations(user_id,session_id,title,account) values($1,gen_random_uuid(),'test','my-work-label') returning id",
+    [a]
+  )).rows[0].id;
+  synthetic.conversations.push(convDyn);
+  executed.push("conversations.account='my-work-label': accepted");
+
+  // conversations.account rejects invalid format (uppercase not allowed)
+  await rejected("conversations.account='INVALID CAPS': rejected", () =>
+    client.query(
+      "insert into conversations(user_id,session_id,title,account) values($1,gen_random_uuid(),'test','INVALID CAPS')",
+      [a]
+    )
+  );
+
+  // ON UPDATE CASCADE: rename label propagates to google_write_approvals
+  const dynApprovalId = (await client.query(
+    "insert into google_write_approvals(user_id,conversation_id,account_label,google_account_id,operation,payload,expires_at) values($1,$2,'my-work-label',$3,'gmail.send','{}',now()+interval '5 minutes') returning id",
+    [a, ca, aDynAcct]
+  )).rows[0].id;
+  synthetic.approvals.push(dynApprovalId);
+  executed.push("approval referencing dynamic label 'my-work-label': succeeded");
+
+  await client.query("update google_accounts set label='renamed-label' where id=$1", [aDynAcct]);
+  const cascaded = await client.query("select account_label from google_write_approvals where id=$1", [dynApprovalId]);
+  if (cascaded.rows[0]?.account_label !== "renamed-label") {
+    throw new Error("ON UPDATE CASCADE did not propagate label rename to google_write_approvals");
+  }
+  executed.push("ON UPDATE CASCADE label rename propagated to approvals: verified");
+  // ── end 0008 ─────────────────────────────────────────────────────────────
+
   console.log(`Cases: ${executed.length}`); for (const line of executed) console.log(`- ${line}`);
 } catch (error) {
   const code = error?.code ? ` (${error.code})` : "";
@@ -136,7 +217,7 @@ try {
   if (connected) {
     try {
       if (!targetVerified) throw new Error("Cleanup skipped because the approved test database identity was not verified.");
-      const identity = await client.query("select current_database() as database, inet_server_addr()::text as address, current_user as role");
+      const identity = await client.query("select current_database() as database, host(inet_server_addr()) as address, current_user as role");
       const db = identity.rows[0];
       if (db.database !== "ai_personal_assistant_test" || db.role !== "postgres" || !db.address || (!/^127(?:\.\d{1,3}){3}$/.test(db.address) && db.address !== "::1")) throw new Error("Cleanup stopped because the connected server no longer matches the approved loopback test target.");
 

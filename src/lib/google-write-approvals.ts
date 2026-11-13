@@ -14,9 +14,9 @@ export async function createGoogleWriteApproval(input: { userId: string; convers
 export async function consumeGoogleWriteApproval(input: { id: string; userId: string; conversationId: string }) {
   const now = new Date();
   const [approval] = await getDatabase().update(googleWriteApprovals).set({ consumedAt: now }).where(and(eq(googleWriteApprovals.id, input.id), eq(googleWriteApprovals.userId, input.userId), eq(googleWriteApprovals.conversationId, input.conversationId), isNull(googleWriteApprovals.consumedAt), gt(googleWriteApprovals.expiresAt, now))).returning();
-  if (!approval || (approval.accountLabel !== "personal" && approval.accountLabel !== "official")) return null;
+  if (!approval || !approval.accountLabel) return null;
   let payload: unknown;
   try { payload = JSON.parse(approval.payload); } catch { return null; }
   if (typeof approval.googleAccountId !== "string" || !approval.googleAccountId) return null;
-  return { label: approval.accountLabel as GoogleAccountLabel, accountId: approval.googleAccountId, operation: approval.operation as GoogleOperation, payload };
+  return { label: approval.accountLabel, accountId: approval.googleAccountId, operation: approval.operation as GoogleOperation, payload };
 }

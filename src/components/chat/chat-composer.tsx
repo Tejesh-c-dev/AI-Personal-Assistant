@@ -1,6 +1,6 @@
 "use client";
 
-import { AccountSelector, type Account } from "@/components/chat/account-selector";
+import { AccountSelector, type Account, type AccountItem } from "@/components/chat/account-selector";
 import { Icon } from "@/components/ui/icons";
 
 type ChatComposerProps = {
@@ -10,9 +10,20 @@ type ChatComposerProps = {
   account: Account;
   onAccountChange: (account: Account) => void;
   isLoading?: boolean;
+  accounts?: AccountItem[];
+  isAccountsLoading?: boolean;
 };
 
-export function ChatComposer({ value, onChange, onSubmit, account, onAccountChange, isLoading = false }: ChatComposerProps) {
+export function ChatComposer({
+  value,
+  onChange,
+  onSubmit,
+  account,
+  onAccountChange,
+  isLoading = false,
+  accounts,
+  isAccountsLoading = false,
+}: ChatComposerProps) {
   const canSubmit = value.trim().length > 0;
 
   return (
@@ -37,7 +48,15 @@ export function ChatComposer({ value, onChange, onSubmit, account, onAccountChan
         <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1">
           <div className="flex items-center gap-3">
             <p className="hidden text-[11px] text-slate-400 sm:block">Enter to send · Shift + Enter for a new line</p>
-            <div className="w-[150px] [&_label]:sr-only [&_select]:h-8 [&_select]:rounded-lg [&_select]:bg-slate-50 [&_select]:py-1.5 [&_select]:text-[11px]"><AccountSelector disabled={isLoading} onChange={onAccountChange} value={account} /></div>
+            <div className="w-[150px] [&_label]:sr-only [&_select]:h-8 [&_select]:rounded-lg [&_select]:bg-slate-50 [&_select]:py-1.5 [&_select]:text-[11px]">
+              <AccountSelector
+                accounts={accounts}
+                disabled={isLoading || isAccountsLoading}
+                isLoading={isAccountsLoading}
+                onChange={onAccountChange}
+                value={account}
+              />
+            </div>
           </div>
           <button aria-label="Send message" className="flex size-9 items-center justify-center rounded-xl bg-[#1d5bd7] text-white transition hover:bg-[#1749af] disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400" disabled={!canSubmit || isLoading} type="submit"><Icon className="size-4" name="arrow-up" /></button>
         </div>

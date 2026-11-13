@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { databaseErrorResponse, unauthorizedResponse } from "../../../lib/api-errors";
-import { getCurrentUser } from "../../../lib/auth";
+import { getCurrentUser, listGoogleAccounts } from "../../../lib/auth";
 import { GoogleAuthorizationError, issueGoogleCapability, issueGoogleProposalCapability, GOOGLE_OPERATIONS, type GoogleOperation } from "../../../lib/google-api";
 import { consumeGoogleWriteApproval } from "../../../lib/google-write-approvals";
 import {
@@ -9,6 +9,7 @@ import {
   createConversation,
   createConversationTitle,
   findConversationBySessionId,
+  isAccount,
   isUuid,
   updateConversation,
 } from "../../../lib/conversations";
@@ -17,18 +18,19 @@ const DEFAULT_TIMEOUT_MS = 150_000;
 export const maxDuration = 180;
 const MAX_MESSAGE_LENGTH = 4_000;
 const ACTIVE_CONVERSATION_COOKIE = "active_conversation_id";
-const ACCOUNT_INSTRUCTIONS = {
-  personal: "Use only the Personal account for Google operations.",
-  official: "Use only the Official account for Google operations.",
-  both: "For read operations, use both connected accounts and label their results. For writes, use only an explicitly selected account.",
-} as const;
 
-type Account = keyof typeof ACCOUNT_INSTRUCTIONS;
+function accountInstruction(account: string): string {
+  if (account === "both") {
+    return "For read operations, use both connected accounts and label their results. For writes, use only an explicitly selected account.";
+  }
+  const label = account.charAt(0).toUpperCase() + account.slice(1);
+  return `Use only the ${label} account for Google operations.`;
+}
 
 type ChatRequest = {
   message: string;
   sessionId: string;
-  account: Account;
+  account: string;
 };
 
 function getTimeoutMs(): number {
@@ -56,7 +58,7 @@ function isChatRequest(value: unknown): value is ChatRequest {
     typeof request.sessionId === "string" &&
     isUuid(request.sessionId.trim()) &&
     typeof request.account === "string" &&
-    request.account in ACCOUNT_INSTRUCTIONS
+    isAccount(request.account)
   );
 }
 
@@ -127,8 +129,21 @@ export async function POST(request: Request) {
     return databaseErrorResponse(error);
   }
 
-  const userPrompt = `${ACCOUNT_INSTRUCTIONS[body.account]}\n\n${body.message}`;
-  const selectedLabels = body.account === "both" ? ["personal", "official"] as const : [body.account] as const;
+  const userPrompt = `${accountInstruction(body.account)}\n\n${body.message}`;
+
+  // Resolve which account labels to issue capabilities for
+  let selectedLabels: string[];
+  if (body.account === "both") {
+    try {
+      const connectedAccounts = await listGoogleAccounts(authenticatedUser.id);
+      selectedLabels = connectedAccounts.map((a) => a.label);
+    } catch {
+      selectedLabels = [];
+    }
+  } else {
+    selectedLabels = [body.account];
+  }
+
   const googleCapabilities: Record<string, Partial<Record<GoogleOperation, string>>> = {};
   const googleProposalCapabilities: Record<string, Partial<Record<GoogleOperation, string>>> = {};
   await Promise.all(selectedLabels.flatMap((label) => GOOGLE_OPERATIONS.map(async (operation) => {
@@ -140,11 +155,11 @@ export async function POST(request: Request) {
     } catch { /* Disconnected accounts and missing scopes stay unavailable to the workflow. */ }
   })));
   const confirmation = /^\s*confirm\s+([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\s*$/i.exec(body.message);
-  let approvedWrite: { label: "personal" | "official"; accountId: string; operation: GoogleOperation; payload: unknown } | null = null;
+  let approvedWrite: { label: string; accountId: string; operation: GoogleOperation; payload: unknown } | null = null;
   if (confirmation) {
     try {
       const approved = await consumeGoogleWriteApproval({ id: confirmation[1], userId: authenticatedUser.id, conversationId: conversation.id });
-      if (approved && body.account === approved.label) {
+      if (approved && (body.account === "both" || body.account === approved.label)) {
         const capability = await issueGoogleCapability(authenticatedUser.id, approved.label, [approved.operation], 300, { [approved.operation]: JSON.stringify(approved.payload) }, approved.accountId);
         googleCapabilities[approved.label] ??= {};
         googleCapabilities[approved.label][approved.operation] = capability;
@@ -251,3 +266,4 @@ export async function POST(request: Request) {
   });
   return response;
 }
+

@@ -45,7 +45,7 @@ export async function beginGoogleAuthorization(
   transactionContext: {
     operation?: "login" | "connect";
     initiatingUserId?: string;
-    accountType?: "personal" | "official";
+    accountLabel?: string;
   } = {},
 ): Promise<{ url: string; state: string }> {
   const { clientId, redirectUri } = getGoogleConfig();
@@ -114,8 +114,7 @@ export async function completeGoogleAuthorization(
   if (
     transaction.operation === "connect" &&
     (!transaction.initiatingUserId ||
-      (transaction.accountType !== "personal" &&
-        transaction.accountType !== "official"))
+      !transaction.accountLabel)
   ) {
     throw new Error("The OAuth connection transaction is invalid.");
   }
@@ -171,7 +170,7 @@ export async function completeGoogleAuthorization(
 
     await saveGoogleAccount({
       userId: transaction.initiatingUserId!,
-      accountType: transaction.accountType as "personal" | "official",
+      label: transaction.accountLabel!,
       googleSubject: payload.sub,
       email: payload.email,
       refreshTokenCiphertext: encryptGoogleRefreshToken(

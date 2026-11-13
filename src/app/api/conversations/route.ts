@@ -28,8 +28,22 @@ export async function GET() {
     const user = await getCurrentUser();
     if (!user) return unauthorizedResponse();
     const conversationList = await listConversations(user.id);
-    const activeConversationId = (await cookies()).get(ACTIVE_CONVERSATION_COOKIE)?.value ?? null;
-    return NextResponse.json({ conversations: conversationList, activeConversationId });
+    const rawActiveId = (await cookies()).get(ACTIVE_CONVERSATION_COOKIE)?.value ?? null;
+    const isValid = conversationList.some((conversation) => conversation.id === rawActiveId);
+    const activeConversationId = isValid ? rawActiveId : null;
+
+    const response = NextResponse.json({ conversations: conversationList, activeConversationId });
+    if (rawActiveId && !isValid) {
+      response.cookies.set(ACTIVE_CONVERSATION_COOKIE, "", {
+        httpOnly: true,
+        maxAge: 0,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        path: "/",
+      });
+    }
+
+    return response;
   } catch (error) {
     return databaseErrorResponse(error);
   }
