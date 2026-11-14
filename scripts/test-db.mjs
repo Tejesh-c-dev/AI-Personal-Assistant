@@ -1,6 +1,8 @@
 import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import pg from "pg";
+import { inspectTestContainer, validateTestUrl, verifyTestDatabase } from "./test-db-identity.mjs";
 
 const { Client } = pg;
 
@@ -8,15 +10,6 @@ let failureReported = false;
 function fail(message) { console.error(`test:db: ${message}`); process.exitCode = 1; failureReported = true; }
 function sanitizedMessage(error) {
   return String(error?.message ?? error).replaceAll(raw, "[redacted connection URL]").replace(/(postgres(?:ql)?:\/\/)[^\s@]+@/gi, "$1[redacted]@");
-}
-function parseUrl(raw) {
-  let url;
-  try { url = new URL(raw); } catch { throw new Error("TEST_DATABASE_URL_UNPOOLED must be a valid PostgreSQL URL."); }
-  if (!["postgres:", "postgresql:"].includes(url.protocol) || !url.hostname || !url.pathname.slice(1)) throw new Error("TEST_DATABASE_URL_UNPOOLED must be a complete PostgreSQL URL.");
-  const host = url.hostname.toLowerCase();
-  if (!(host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host))) throw new Error("The test database host must be loopback.");
-  if (decodeURIComponent(url.pathname.slice(1)) !== "ai_personal_assistant_test") throw new Error("The test database name must be ai_personal_assistant_test.");
-  return url;
 }
 async function configuredUrls() {
   const values = [];
@@ -35,7 +28,10 @@ async function configuredUrls() {
 const raw = process.env.TEST_DATABASE_URL_UNPOOLED;
 if (!raw) { fail("TEST_DATABASE_URL_UNPOOLED is required; no application URL fallback is allowed."); process.exit(1); }
 let target;
-try { target = parseUrl(raw); } catch (error) { fail(error.message); process.exit(1); }
+try { target = validateTestUrl(raw); } catch (error) { fail(error.message); process.exit(1); }
+let composeContainer;
+try { composeContainer = inspectTestContainer(); } catch (error) { fail(error.message); process.exit(1); }
+if (!["postgres:", "postgresql:"].includes(target.protocol) || !target.hostname || !target.pathname.slice(1)) { fail("TEST_DATABASE_URL_UNPOOLED must be a complete PostgreSQL URL."); process.exit(1); }
 const targetKey = `${target.hostname.toLowerCase()}:${target.port || "5432"}/${decodeURIComponent(target.pathname.slice(1))}`;
 for (const value of await configuredUrls()) {
   try { const url = new URL(value); const key = `${url.hostname.toLowerCase()}:${url.port || "5432"}/${decodeURIComponent(url.pathname.slice(1))}`; if (key === targetKey) { fail("The test database matches a configured application or staging database."); process.exit(1); } } catch { /* ignore unrelated malformed config */ }
@@ -63,10 +59,8 @@ async function rejected(label, query) {
 try {
   await client.connect();
   connected = true;
-  const identity = await client.query("select current_database() as database, host(inet_server_addr()) as address, current_user as role");
-  const db = identity.rows[0];
-  console.log(`PostgreSQL target: database=${db.database}, address=${db.address ?? "local socket"}, role=${db.role}`);
-  if (db.database !== "ai_personal_assistant_test" || db.role !== "postgres" || !db.address || (!/^127(?:\.\d{1,3}){3}$/.test(db.address) && db.address !== "::1")) throw new Error("Connected server identity does not match the approved loopback test target.");
+  const db = await verifyTestDatabase(client, raw, composeContainer);
+  console.log(`PostgreSQL target: host=${db.host}, port=${db.port}, database=${db.database}, address=${db.address}, role=${db.role}, container=${db.containerId}, project=${db.project}`);
   targetVerified = true;
 
   await client.query("create table if not exists public._ai_personal_assistant_test_migrations (name text primary key, applied_at timestamptz not null default now())");
@@ -118,25 +112,81 @@ try {
   synthetic.conversations.push(ca);
   const cb = (await client.query("insert into conversations(user_id,session_id,title,account) values($1,gen_random_uuid(),'test','personal') returning id", [b])).rows[0].id;
   synthetic.conversations.push(cb);
-  const aa = (await client.query("insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext) values($1,$2,'personal','synthetic') returning id", [a, ia])).rows[0].id;
+  const aa = (await client.query("insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext,granted_scopes) values($1,$2,'personal','synthetic',ARRAY['https://www.googleapis.com/auth/gmail.modify']::text[]) returning id", [a, ia])).rows[0].id;
   synthetic.accounts.push(aa);
-  const ab = (await client.query("insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext) values($1,$2,'personal','synthetic') returning id", [b, ib])).rows[0].id;
+  const ab = (await client.query("insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext,granted_scopes) values($1,$2,'official','synthetic',ARRAY['https://www.googleapis.com/auth/gmail.modify']::text[]) returning id", [b, ib])).rows[0].id;
   synthetic.accounts.push(ab);
   executed.push("same-owner conversation, identity, account inserts: succeeded");
+
+  await client.query("insert into messages(conversation_id,role,content) values($1,'assistant','synthetic private A'),($2,'assistant','synthetic private B')", [ca, cb]);
+  const aMessages = await client.query("select m.content from messages m join conversations c on c.id=m.conversation_id where c.id=$1 and c.user_id=$2", [cb, a]);
+  if (aMessages.rowCount !== 0) throw new Error("User A retrieved User B conversation messages.");
+  const bAccount = await client.query("select id from google_accounts where user_id=$1 and id=$2", [a, ab]);
+  if (bAccount.rowCount !== 0) throw new Error("User A retrieved User B Google account.");
+  executed.push("tenant-scoped conversation message and account lookups: cross-user records returned no rows");
   await rejected("cross-owner identity/account association", () => client.query("insert into google_accounts(user_id,identity_id,label,refresh_token_ciphertext) values($1,$2,'official','synthetic')", [a, ib]));
   const approvalSql = "insert into google_write_approvals(user_id,conversation_id,account_label,google_account_id,operation,payload,expires_at) values($1,$2,'personal',$3,'gmail.send','{}',now()+interval '5 minutes')";
   const initialApproval = await client.query(approvalSql + " returning id", [a, ca, aa]);
   synthetic.approvals.push(initialApproval.rows[0].id);
   executed.push("same-owner approval insert: succeeded");
+  const repositoryPayload = { to: "approved@example.test", subject: "Synthetic approved payload", body: "Synthetic only" };
+  const repositoryApproval = await client.query(
+    "insert into google_write_approvals(user_id,conversation_id,account_label,google_account_id,operation,payload,expires_at) values($1,$2,'personal',$3,'gmail.send',$4,now()+interval '5 minutes') returning id",
+    [a, ca, aa, JSON.stringify(repositoryPayload)],
+  );
+  synthetic.approvals.push(repositoryApproval.rows[0].id);
+  const repositoryCheck = spawnSync("node", ["--conditions=react-server", "--import", "tsx", "scripts/test-db-repositories.ts"], {
+    encoding: "utf8",
+    windowsHide: true,
+    env: {
+      ...process.env,
+      TEST_DATABASE_URL_UNPOOLED: raw,
+      DB_TEST_USER_A: a,
+      DB_TEST_USER_B: b,
+      DB_TEST_CONVERSATION_A: ca,
+      DB_TEST_CONVERSATION_B: cb,
+      DB_TEST_ACCOUNT_A: aa,
+      DB_TEST_ACCOUNT_B: ab,
+      DB_TEST_APPROVAL: repositoryApproval.rows[0].id,
+      DB_TEST_APPROVAL_PAYLOAD: JSON.stringify(repositoryPayload),
+    },
+  });
+  if (repositoryCheck.error || repositoryCheck.status !== 0) {
+    throw new Error(`Database repository integration failed: ${(repositoryCheck.stderr || repositoryCheck.stdout || repositoryCheck.error?.message || "unknown error").trim()}`);
+  }
+  console.log(repositoryCheck.stdout.trim());
   await rejected("cross-owner approval conversation", () => client.query(approvalSql, [a, cb, aa]));
   await rejected("cross-owner approval account", () => client.query(approvalSql, [a, ca, ab]));
   await rejected("cross-owner conversation reference", () => client.query("insert into google_write_approvals(user_id,conversation_id,account_label,google_account_id,operation,payload,expires_at) values($1,$2,'personal',$3,'gmail.send','{}',now()+interval '5 minutes')", [a, cb, aa]));
   const approval = await client.query(approvalSql + " returning id", [a, ca, aa]);
   synthetic.approvals.push(approval.rows[0].id);
-  const used = await client.query("update google_write_approvals set consumed_at=now() where id=$1 and user_id=$2 and conversation_id=$3 and consumed_at is null and expires_at>now() returning id", [approval.rows[0].id, a, ca]);
-  const twice = await client.query("update google_write_approvals set consumed_at=now() where id=$1 and user_id=$2 and conversation_id=$3 and consumed_at is null and expires_at>now() returning id", [approval.rows[0].id, a, ca]);
-  if (used.rowCount !== 1 || twice.rowCount !== 0) throw new Error("Approval consumption did not enforce one-time use.");
-  executed.push("approval consumption: succeeded once; second consume rejected");
+  const competingClient = new Client({ connectionString: raw });
+  await competingClient.connect();
+  try {
+    const consume = (dbClient, userId, conversationId) => dbClient.query(
+      "update google_write_approvals set consumed_at=now() where id=$1 and user_id=$2 and conversation_id=$3 and consumed_at is null and expires_at>now() returning id",
+      [approval.rows[0].id, userId, conversationId],
+    );
+    const wrongUser = await consume(competingClient, b, ca);
+    const wrongConversation = await consume(competingClient, a, cb);
+    if (wrongUser.rowCount !== 0 || wrongConversation.rowCount !== 0) throw new Error("Approval was consumed by a wrong user or conversation.");
+    const [first, second] = await Promise.all([consume(client, a, ca), consume(competingClient, a, ca)]);
+    if (first.rowCount + second.rowCount !== 1) throw new Error("Concurrent approval consumption did not have exactly one winner.");
+    const replay = await consume(competingClient, a, ca);
+    if (replay.rowCount !== 0) throw new Error("Approval replay was accepted.");
+  } finally {
+    await competingClient.end();
+  }
+  executed.push("approval atomicity: wrong user/conversation rejected; concurrent consume had exactly one winner; replay rejected");
+
+  const expiredApproval = await client.query(
+    "insert into google_write_approvals(user_id,conversation_id,account_label,google_account_id,operation,payload,expires_at) values($1,$2,'personal',$3,'gmail.send',$4,now()-interval '1 minute') returning id",
+    [a, ca, aa, JSON.stringify({ to: "allowed@example.test" })],
+  );
+  synthetic.approvals.push(expiredApproval.rows[0].id);
+  const expiredConsume = await client.query("update google_write_approvals set consumed_at=now() where id=$1 and user_id=$2 and conversation_id=$3 and consumed_at is null and expires_at>now() returning id", [expiredApproval.rows[0].id, a, ca]);
+  if (expiredConsume.rowCount !== 0) throw new Error("Expired approval was consumed.");
+  executed.push("approval expiry: expired row not consumable");
   // Capability rows use the same nonce/expiry/consumption constraints as the application verifier.
   const nonce = `${prefix}_cap`;
   await client.query("insert into google_capabilities(nonce,expires_at) values($1,now()+interval '5 minutes')", [nonce]);
@@ -217,9 +267,7 @@ try {
   if (connected) {
     try {
       if (!targetVerified) throw new Error("Cleanup skipped because the approved test database identity was not verified.");
-      const identity = await client.query("select current_database() as database, host(inet_server_addr()) as address, current_user as role");
-      const db = identity.rows[0];
-      if (db.database !== "ai_personal_assistant_test" || db.role !== "postgres" || !db.address || (!/^127(?:\.\d{1,3}){3}$/.test(db.address) && db.address !== "::1")) throw new Error("Cleanup stopped because the connected server no longer matches the approved loopback test target.");
+      await verifyTestDatabase(client, raw);
 
       const cleanupErrors = [];
       async function cleanup(label, sql, values) {

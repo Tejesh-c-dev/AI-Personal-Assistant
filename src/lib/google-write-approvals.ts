@@ -7,7 +7,7 @@ import type { GoogleAccountLabel, GoogleOperation } from "./google-api";
 
 export async function createGoogleWriteApproval(input: { userId: string; conversationId: string; label: GoogleAccountLabel; googleAccountId: string; operation: GoogleOperation; payload: unknown }) {
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-  const [approval] = await getDatabase().insert(googleWriteApprovals).values({ userId: input.userId, conversationId: input.conversationId, accountLabel: input.label, googleAccountId: input.googleAccountId, operation: input.operation, payload: JSON.stringify(input.payload), expiresAt }).returning({ id: googleWriteApprovals.id });
+  const [approval] = await getDatabase().insert(googleWriteApprovals).values({ userId: input.userId, conversationId: input.conversationId, accountLabel: input.label, googleAccountId: input.googleAccountId, operation: input.operation, payload: JSON.stringify(input.payload), expiresAt }).returning();
   return { approvalId: approval.id, expiresAt: expiresAt.toISOString() };
 }
 

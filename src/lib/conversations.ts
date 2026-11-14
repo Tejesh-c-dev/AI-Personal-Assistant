@@ -100,7 +100,7 @@ export async function deleteConversation(id: string, userId: string): Promise<bo
   const deleted = await db
     .delete(conversations)
     .where(and(eq(conversations.id, id), eq(conversations.userId, userId)))
-    .returning({ id: conversations.id });
+    .returning();
   return deleted.length > 0;
 }
 
@@ -134,3 +134,15 @@ export async function findConversationByIdAndSessionId(id: string, userId: strin
     .limit(1);
   return conversation ?? null;
 }
+
+export async function getConversationMessages(conversationId: string, limit = 20): Promise<Message[]> {
+  const db = getDatabase();
+  const rows = await db
+    .select()
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(desc(messages.createdAt))
+    .limit(limit);
+  return rows.reverse();
+}
+

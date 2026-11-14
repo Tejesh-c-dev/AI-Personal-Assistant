@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEvent } from "@google/adk";
 
 vi.mock("server-only", () => ({}));
 vi.mock("../../../lib/auth", () => ({
   getCurrentUser: vi.fn().mockResolvedValue({ id: "user-1" }),
   listGoogleAccounts: vi.fn().mockResolvedValue([]),
+  validateAccountLabel: (value: string) => {
+    const normalized = value.trim().toLowerCase();
+    if (!/^[a-z0-9 -]{1,50}$/.test(normalized)) throw new Error("INVALID_LABEL");
+    if (normalized === "both") throw new Error("RESERVED_LABEL");
+    return normalized;
+  },
 }));
 vi.mock("../../../lib/conversations", () => ({
   appendMessage: vi.fn().mockResolvedValue({}),
@@ -15,6 +22,7 @@ vi.mock("../../../lib/conversations", () => ({
   }),
   createConversationTitle: (value: string) => value.trim().slice(0, 80),
   findConversationBySessionId: vi.fn().mockResolvedValue(null),
+  getConversationMessages: vi.fn().mockResolvedValue([]),
   isAccount: (value: unknown) => typeof value === "string" && (value === "both" || value === "personal" || value === "official" || (/^[a-z0-9 \-]{1,50}$/.test(value.trim().toLowerCase()) && value.trim().toLowerCase() !== "unknown")),
   isUuid: (value: unknown) => typeof value === "string" && value.length === 36,
   updateConversation: vi.fn().mockResolvedValue({
@@ -24,9 +32,26 @@ vi.mock("../../../lib/conversations", () => ({
   }),
 }));
 
+const adkMocks = vi.hoisted(() => ({
+  createRunner: vi.fn(),
+  handleConfirmation: vi.fn(),
+}));
+
+vi.mock("../../../lib/adk/agent-runner", () => ({
+  createRequestScopedRunner: adkMocks.createRunner,
+}));
+vi.mock("../../../lib/adk/confirmation-handler", () => ({
+  parseConfirmationCommand: (msg: string) => {
+    const match = /^\s*confirm\s+([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\s*$/i.exec(msg);
+    return match ? match[1] : null;
+  },
+  handleConfirmation: adkMocks.handleConfirmation,
+}));
+
 import { POST } from "./route";
 import * as auth from "../../../lib/auth";
 import * as conversationRepository from "../../../lib/conversations";
+import { GoogleAuthorizationError } from "../../../lib/google-api";
 
 const originalFetch = globalThis.fetch;
 
@@ -59,6 +84,7 @@ describe("POST /api/chat", () => {
   });
 
   it("forwards the account instruction and preserves a valid upstream response", async () => {
+    vi.stubEnv("USE_ADK", "false");
     vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
     vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
     const fetchMock = vi.fn().mockResolvedValue(
@@ -75,6 +101,7 @@ describe("POST /api/chat", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(adkMocks.createRunner).not.toHaveBeenCalled();
     const responseBody = await response.json();
     expect(responseBody).toEqual({ output: "Done" });
     expect(JSON.stringify(responseBody)).not.toContain("test-webhook-secret");
@@ -207,7 +234,7 @@ describe("POST /api/chat", () => {
     expect(response.status).toBe(503);
   });
 
-  it("returns 502 for an upstream HTTP error while preserving its JSON body", async () => {
+  it("returns a safe 502 for an upstream HTTP error", async () => {
     vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
     vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
     globalThis.fetch = vi.fn().mockResolvedValue(
@@ -225,9 +252,7 @@ describe("POST /api/chat", () => {
     );
 
     expect(response.status).toBe(502);
-    await expect(response.json()).resolves.toEqual({
-      message: "Workflow failed",
-    });
+    await expect(response.json()).resolves.toEqual({ error: "The chat provider could not complete your request." });
   });
 
   it("returns 502 when the upstream request fails", async () => {
@@ -314,5 +339,236 @@ describe("POST /api/chat", () => {
     );
 
     expect(response.status).toBe(502);
+  });
+
+  describe("Google ADK Orchestration (USE_ADK=true)", () => {
+    it("routes confirmation command to handleConfirmation when USE_ADK=true", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      adkMocks.handleConfirmation.mockResolvedValueOnce({ output: "✓ Email sent successfully via your 'personal' account." });
+
+      const response = await POST(
+        makeRequest({
+          message: "CONFIRM 11111111-2222-4333-8444-555555555555",
+          sessionId: "00000000-0000-4000-8000-000000000002",
+          account: "personal",
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json).toEqual({ output: "✓ Email sent successfully via your 'personal' account." });
+      expect(adkMocks.handleConfirmation).toHaveBeenCalledWith({
+        approvalId: "11111111-2222-4333-8444-555555555555",
+        user: expect.objectContaining({ id: "user-1" }),
+        conversation: expect.objectContaining({ id: "00000000-0000-4000-8000-000000000001" }),
+        selectedAccount: "personal",
+      });
+    });
+
+    it("returns a stable client error when confirmation validation fails", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      adkMocks.handleConfirmation.mockRejectedValueOnce(new Error("Account mismatch"));
+
+      const response = await POST(
+        makeRequest({
+          message: "CONFIRM 11111111-2222-4333-8444-555555555555",
+          sessionId: "00000000-0000-4000-8000-000000000002",
+          account: "both",
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      const json = await response.json();
+      expect(json.error).toBe("The selected account does not match this approval.");
+      expect(JSON.stringify(json)).not.toContain("Account mismatch");
+      expect(response.headers.get("X-Request-ID")).toBeTruthy();
+    });
+
+    it("returns a safe server error when confirmation execution fails", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      adkMocks.handleConfirmation.mockRejectedValueOnce(new Error("provider token SQL stack"));
+      const response = await POST(makeRequest({
+        message: "CONFIRM 11111111-2222-4333-8444-555555555555",
+        sessionId: "00000000-0000-4000-8000-000000000002",
+        account: "personal",
+      }));
+      const body = await response.text();
+      expect(response.status).toBe(500);
+      expect(body).toBe('{"error":"The confirmation could not be completed."}');
+      expect(body).not.toMatch(/provider token|SQL|stack/);
+    });
+
+    it("executes ADK runner when USE_ADK=true for normal chat turn", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      vi.stubEnv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/chat");
+      vi.stubEnv("N8N_WEBHOOK_SECRET", "test-webhook-secret");
+      const fetchMock = vi.fn();
+      globalThis.fetch = fetchMock;
+      const priorMessage = {
+        id: "prior-message",
+        conversationId: "00000000-0000-4000-8000-000000000001",
+        role: "user" as const,
+        content: "Earlier synthetic question",
+        createdAt: new Date("2026-11-13T10:00:00Z"),
+      };
+      vi.mocked(auth.listGoogleAccounts).mockResolvedValueOnce([{ label: "personal", status: "active" }] as never);
+      vi.mocked(conversationRepository.getConversationMessages).mockResolvedValueOnce([priorMessage]);
+      let submittedMessage = "";
+      const appendEvent = vi.fn().mockResolvedValue({});
+      const mockRunAsync = vi.fn(async function* ({ newMessage }: { newMessage: { parts: { text: string }[] } }) {
+        submittedMessage = newMessage.parts.map((part) => part.text).join("\n");
+        yield createEvent({
+          invocationId: "inv-1",
+          author: "personal_assistant",
+          content: {
+            role: "model",
+            parts: [{ text: "Please connect a Google account before I can access Gmail." }],
+          },
+        });
+      });
+
+      adkMocks.createRunner.mockReturnValueOnce({
+        runner: { runAsync: mockRunAsync },
+        sessionService: {
+          createSession: vi.fn().mockResolvedValue({ events: [] }),
+          appendEvent,
+        },
+        appName: "ai-personal-assistant",
+      });
+
+      const response = await POST(
+        makeRequest({
+          message: "List my emails",
+          sessionId: "00000000-0000-4000-8000-000000000002",
+          account: "personal",
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json).toEqual({ output: "Please connect a Google account before I can access Gmail." });
+      expect(conversationRepository.getConversationMessages).toHaveBeenCalledTimes(1);
+      expect(appendEvent).toHaveBeenCalledTimes(1);
+      expect(appendEvent).toHaveBeenCalledWith(expect.objectContaining({
+        event: expect.objectContaining({
+          content: expect.objectContaining({ parts: [{ text: "Earlier synthetic question" }] }),
+        }),
+      }));
+      expect(JSON.stringify(appendEvent.mock.calls)).not.toContain("List my emails");
+      expect(conversationRepository.appendMessage).toHaveBeenCalledTimes(2);
+      expect(conversationRepository.appendMessage).toHaveBeenNthCalledWith(1, {
+        conversationId: "00000000-0000-4000-8000-000000000001",
+        role: "user",
+        content: "List my emails",
+      });
+      expect(conversationRepository.appendMessage).toHaveBeenNthCalledWith(2, {
+        conversationId: "00000000-0000-4000-8000-000000000001",
+        role: "assistant",
+        content: "Please connect a Google account before I can access Gmail.",
+      });
+      expect(submittedMessage).toBe("Use only the Personal account for Google operations.\n\nList my emails");
+      expect(mockRunAsync).toHaveBeenCalledTimes(1);
+      expect(mockRunAsync).toHaveBeenCalledWith(expect.objectContaining({ userId: "user-1" }));
+      expect(
+        vi.mocked(conversationRepository.appendMessage).mock.invocationCallOrder[0],
+      ).toBeLessThan(mockRunAsync.mock.invocationCallOrder[0]);
+      expect(adkMocks.createRunner).toHaveBeenCalledWith({
+        user: expect.objectContaining({ id: "user-1" }),
+        conversation: expect.objectContaining({ id: "00000000-0000-4000-8000-000000000001" }),
+        selectedAccount: "personal",
+        connectedLabels: ["personal"],
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns a deterministic connection instruction without invoking the model when no active account exists", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      vi.mocked(auth.listGoogleAccounts).mockResolvedValueOnce([
+        { label: "personal", status: "revoked" },
+      ] as never);
+
+      const response = await POST(makeRequest({
+        message: "Check my email",
+        sessionId: "00000000-0000-4000-8000-000000000002",
+        account: "personal",
+      }));
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        output: "No Google account is connected. Connect a Google account before I can access Gmail, Calendar, or Docs.",
+      });
+      expect(adkMocks.createRunner).not.toHaveBeenCalled();
+      expect(conversationRepository.appendMessage).toHaveBeenNthCalledWith(2, {
+        conversationId: "00000000-0000-4000-8000-000000000001",
+        role: "assistant",
+        content: "No Google account is connected. Connect a Google account before I can access Gmail, Calendar, or Docs.",
+      });
+    });
+
+    it("normalizes mixed-case selected and connected labels before creating tools", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      vi.mocked(auth.listGoogleAccounts).mockResolvedValueOnce([{ label: "Work-Account", status: "active" }] as never);
+      adkMocks.createRunner.mockReturnValueOnce({
+        runner: { runAsync: async function* () {} },
+        sessionService: { createSession: vi.fn().mockResolvedValue({ events: [] }) },
+      });
+
+      await POST(makeRequest({ message: "Hello", sessionId: "00000000-0000-4000-8000-000000000002", account: " WORK-ACCOUNT " }));
+
+      expect(adkMocks.createRunner).toHaveBeenCalledWith(expect.objectContaining({ selectedAccount: "work-account", connectedLabels: ["work-account"] }));
+    });
+
+    it("returns generic safe errors and request-correlated logs for runner failures", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      vi.mocked(auth.listGoogleAccounts).mockResolvedValueOnce([{ label: "personal", status: "active" }] as never);
+      adkMocks.createRunner.mockImplementationOnce(() => { throw new Error("SQL private prompt capability-token"); });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await POST(makeRequest({ message: "private prompt", sessionId: "00000000-0000-4000-8000-000000000002", account: "personal" }));
+      const body = await response.text();
+
+      expect(response.status).toBe(502);
+      expect(body).toBe('{"error":"The assistant is temporarily unavailable."}');
+      const requestId = response.headers.get("X-Request-ID");
+      expect(requestId).toBeTruthy();
+      expect(JSON.stringify(log.mock.calls)).toContain(requestId);
+      expect(JSON.stringify(log.mock.calls)).not.toContain("private prompt");
+      expect(JSON.stringify(log.mock.calls)).not.toContain("capability-token");
+      log.mockRestore();
+    });
+
+    it("returns a safe hydration error", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      vi.mocked(auth.listGoogleAccounts).mockResolvedValueOnce([{ label: "personal", status: "active" }] as never);
+      adkMocks.createRunner.mockReturnValueOnce({
+        runner: { runAsync: async function* () {} },
+        sessionService: { createSession: vi.fn().mockRejectedValue(new Error("SQL stack private-data")) },
+      });
+      const response = await POST(makeRequest({ message: "Hello", sessionId: "00000000-0000-4000-8000-000000000002", account: "personal" }));
+      const body = await response.text();
+      expect(response.status).toBe(502);
+      expect(body).not.toMatch(/SQL|stack|private-data/);
+    });
+
+    it("returns a safe database error with a request ID", async () => {
+      vi.mocked(conversationRepository.findConversationBySessionId).mockRejectedValueOnce(new Error("SQL private prompt token"));
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      const response = await POST(makeRequest({ message: "Hello", sessionId: "00000000-0000-4000-8000-000000000002", account: "personal" }));
+      const body = await response.text();
+      expect(response.status).toBe(500);
+      expect(body).not.toMatch(/SQL|private prompt|token/);
+      expect(JSON.stringify(log.mock.calls)).toContain(response.headers.get("X-Request-ID"));
+      log.mockRestore();
+    });
+
+    it("maps Google authorization failures to a safe 403", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      vi.mocked(auth.listGoogleAccounts).mockRejectedValueOnce(new GoogleAuthorizationError("RECONNECT_REQUIRED"));
+      const response = await POST(makeRequest({ message: "Hello", sessionId: "00000000-0000-4000-8000-000000000002", account: "personal" }));
+      const body = await response.text();
+      expect(response.status).toBe(403);
+      expect(body).not.toContain("RECONNECT_REQUIRED");
+      expect(response.headers.get("X-Request-ID")).toBeTruthy();
+    });
   });
 });

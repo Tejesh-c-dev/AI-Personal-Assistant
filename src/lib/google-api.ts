@@ -112,7 +112,7 @@ export async function issueGoogleProposalCapability(userId: string, label: Googl
 }
 async function consumeCapabilityNonce(nonce: string) {
   const consumedAt = new Date();
-  const consumed = await getDatabase().update(googleCapabilities).set({ consumedAt }).where(and(eq(googleCapabilities.nonce, nonce), isNull(googleCapabilities.consumedAt), gt(googleCapabilities.expiresAt, consumedAt))).returning({ nonce: googleCapabilities.nonce });
+  const consumed = await getDatabase().update(googleCapabilities).set({ consumedAt }).where(and(eq(googleCapabilities.nonce, nonce), isNull(googleCapabilities.consumedAt), gt(googleCapabilities.expiresAt, consumedAt))).returning();
   if (!consumed.length) throw new Error();
 }
 export async function verifyGoogleProposalCapability(token: string, operation: GoogleOperation): Promise<{ userId: string; label: GoogleAccountLabel; conversationId: string; accountId: string }> {
