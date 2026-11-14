@@ -7,6 +7,7 @@ type ChatComposerProps = {
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
+  onStop?: () => void;
   account: Account;
   onAccountChange: (account: Account) => void;
   isLoading?: boolean;
@@ -18,6 +19,7 @@ export function ChatComposer({
   value,
   onChange,
   onSubmit,
+  onStop,
   account,
   onAccountChange,
   isLoading = false,
@@ -28,7 +30,13 @@ export function ChatComposer({
 
   return (
     <div className="mx-auto w-full max-w-4xl">
-      <form className="rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_10px_35px_rgb(15_23_42_/_0.07)] transition focus-within:border-blue-300 focus-within:ring-4 focus-within:ring-blue-50" onSubmit={(event) => { event.preventDefault(); if (canSubmit) onSubmit(); }}>
+      <form
+        className="rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_10px_35px_rgb(15_23_42_/_0.07)] transition focus-within:border-blue-300 focus-within:ring-4 focus-within:ring-blue-50"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (canSubmit && !isLoading) onSubmit();
+        }}
+      >
         <label className="sr-only" htmlFor="message">Message your assistant</label>
         <textarea
           className="min-h-20 w-full resize-none bg-transparent px-3 py-2 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400"
@@ -36,7 +44,7 @@ export function ChatComposer({
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              if (canSubmit) onSubmit();
+              if (canSubmit && !isLoading) onSubmit();
             }
           }}
           onChange={(event) => onChange(event.target.value)}
@@ -58,7 +66,28 @@ export function ChatComposer({
               />
             </div>
           </div>
-          <button aria-label="Send message" className="flex size-9 items-center justify-center rounded-xl bg-[#1d5bd7] text-white transition hover:bg-[#1749af] disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400" disabled={!canSubmit || isLoading} type="submit"><Icon className="size-4" name="arrow-up" /></button>
+          {isLoading ? (
+            <button
+              aria-label="Stop generating response"
+              className="flex size-9 items-center justify-center rounded-xl bg-slate-800 text-white transition hover:bg-slate-700 shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-500"
+              onClick={(e) => {
+                e.preventDefault();
+                onStop?.();
+              }}
+              type="button"
+            >
+              <span className="size-3 rounded-sm bg-white" />
+            </button>
+          ) : (
+            <button
+              aria-label="Send message"
+              className="flex size-9 items-center justify-center rounded-xl bg-[#1d5bd7] text-white transition hover:bg-[#1749af] disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+              disabled={!canSubmit}
+              type="submit"
+            >
+              <Icon className="size-4" name="arrow-up" />
+            </button>
+          )}
         </div>
       </form>
       <p className="mt-3 text-center text-[11px] text-slate-400">AI Personal Assistant can make mistakes. Check important information.</p>

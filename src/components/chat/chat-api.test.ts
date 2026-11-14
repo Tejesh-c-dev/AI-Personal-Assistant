@@ -4,6 +4,7 @@ import {
   createChatRequest,
   parseAssistantResponse,
   sendChatMessage,
+  streamChatMessage,
 } from "./chat-api";
 
 describe("chat API helpers", () => {
@@ -68,5 +69,78 @@ describe("chat API helpers", () => {
       .rejects.toThrow("The n8n webhook is not configured.");
     expect(() => parseAssistantResponse({ unexpected: { raw: "data" } }))
       .toThrow("The assistant returned an unsupported response.");
+  });
+
+  describe("streamChatMessage", () => {
+    it("parses SSE event stream and fires callbacks in order", async () => {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"type":"start","requestId":"req-1"}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"activity","id":"a1","label":"Searching Gmail","status":"running"}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"activity","id":"a1","label":"Searching Gmail","status":"completed"}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"approval_required","approvalId":"app-1","account":"personal","operation":"gmail.send","expiresAt":"2026-11-15T00:00:00Z","details":{"to":"user@test.com"}}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"text_delta","text":"I found 3 emails."}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"final","messageId":"msg-1"}\n\n'));
+          controller.close();
+        },
+      });
+
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(stream, { headers: { "Content-Type": "text/event-stream" } }),
+      );
+
+      const events: string[] = [];
+      const activities: unknown[] = [];
+      let approval: unknown = null;
+      let text = "";
+      let finalId = "";
+
+      await streamChatMessage({
+        message: "Search emails",
+        sessionId: "sess-1",
+        account: "personal",
+        onStart: (reqId) => events.push(`start:${reqId}`),
+        onActivity: (act) => activities.push(act),
+        onApprovalRequired: (app) => { approval = app; },
+        onTextDelta: (delta) => { text += delta; },
+        onFinal: (id) => { finalId = id; },
+        fetcher,
+      });
+
+      expect(events).toEqual(["start:req-1"]);
+      expect(activities).toEqual([
+        { id: "a1", label: "Searching Gmail", status: "running" },
+        { id: "a1", label: "Searching Gmail", status: "completed" },
+      ]);
+      expect(approval).toEqual({
+        approvalId: "app-1",
+        account: "personal",
+        operation: "gmail.send",
+        expiresAt: "2026-11-15T00:00:00Z",
+        details: { to: "user@test.com" },
+      });
+      expect(text).toBe("I found 3 emails.");
+      expect(finalId).toBe("msg-1");
+    });
+
+    it("handles HTTP error response before stream starts", async () => {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify({ error: "Google authorization required" }), { status: 403 }),
+      );
+
+      const onError = vi.fn();
+      await expect(
+        streamChatMessage({
+          message: "Hi",
+          sessionId: "sess-1",
+          account: "personal",
+          onError,
+          fetcher,
+        }),
+      ).rejects.toThrow("Google authorization required");
+
+      expect(onError).toHaveBeenCalledWith("Google authorization required");
+    });
   });
 });

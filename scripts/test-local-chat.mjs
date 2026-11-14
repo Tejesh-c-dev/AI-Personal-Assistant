@@ -44,11 +44,28 @@ async function main() {
       && payload?.provider?.require_parameters === true
       && payload?.provider?.allow_fallbacks === false;
     providerRequests.push({ valid, payload });
-    response.writeHead(valid ? 200 : 400, { "content-type": "application/json" });
-    response.end(JSON.stringify(valid ? {
+    if (!valid) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "Invalid local test request" } }));
+      return;
+    }
+    if (payload?.stream) {
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        "connection": "keep-alive",
+      });
+      response.write(`data: ${JSON.stringify({ id: "local-stream-response", choices: [{ index: 0, delta: { role: "assistant", content: "Local streamed " } }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ id: "local-stream-response", choices: [{ index: 0, delta: { content: "response" } }] })}\n\n`);
+      response.write("data: [DONE]\n\n");
+      response.end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
       id: "local-test-response",
       choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "Local test response" } }],
-    } : { error: { message: "Invalid local test request" } }));
+    }));
   });
   const providerPort = await listen(providerServer);
 
@@ -175,10 +192,44 @@ async function main() {
       body: JSON.stringify({ message: "Must be rejected", sessionId: randomUUID(), account: "personal" }),
     });
     if (unauthenticated.status !== 401) throw new Error("An unauthenticated chat request was not rejected.");
-    if (providerRequests.length !== 3 || providerRequests.some((request) => !request.valid)) {
+
+    // Test SSE streaming request
+    const streamSessionId = randomUUID();
+    const streamResponse = await fetch(`http://127.0.0.1:${appPort}/api/chat`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        cookie: `assistant_session=${tokens[0]}`,
+      },
+      body: JSON.stringify({ message: "Test streaming message", sessionId: streamSessionId, account: "personal" }),
+    });
+    if (streamResponse.status !== 200 || !streamResponse.headers.get("content-type")?.includes("text/event-stream")) {
+      throw new Error(`Authenticated streaming chat request failed with HTTP ${streamResponse.status}.`);
+    }
+    const streamBody = await streamResponse.text();
+    if (!streamBody.includes('"type":"start"') || !streamBody.includes('"type":"text_delta"') || !streamBody.includes('"type":"final"')) {
+      throw new Error("Streaming chat response did not contain expected SSE events.");
+    }
+    const streamConversation = (await db.query(
+      "select id from conversations where user_id=$1 and session_id=$2",
+      [fixtures.users[0], streamSessionId],
+    )).rows[0];
+    if (!streamConversation) throw new Error("Streaming chat conversation was not created.");
+    fixtures.conversations.push(streamConversation.id);
+    const streamDbMessages = (await db.query(
+      "select role,content from messages where conversation_id=$1 order by created_at,id",
+      [streamConversation.id],
+    )).rows;
+    if (streamDbMessages.length !== 2 || streamDbMessages[0].role !== "user" || streamDbMessages[1].role !== "assistant"
+      || streamDbMessages[1].content !== "Local streamed response") {
+      throw new Error("Streaming chat messages were not persisted correctly.");
+    }
+
+    if (providerRequests.length !== 4 || providerRequests.some((request) => !request.valid)) {
       throw new Error("The local model stub did not receive the expected privacy-constrained requests.");
     }
-    resultSummary = "Authenticated chat, unauthenticated rejection, ownership, persistence, session hydration, and local provider checks passed.";
+    resultSummary = "Authenticated chat, unauthenticated rejection, SSE streaming, ownership, persistence, session hydration, and local provider checks passed.";
   } finally {
     try {
       if (nextProcess && nextProcess.exitCode === null) {

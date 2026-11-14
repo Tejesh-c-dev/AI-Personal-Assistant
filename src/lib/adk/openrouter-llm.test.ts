@@ -25,10 +25,16 @@ describe("OpenRouterLlm", () => {
 
   it("returns parallel tool calls with their IDs and parsed arguments for ADK", async () => {
     vi.stubEnv("OPENROUTER_MODEL", "provider/model"); vi.stubEnv("OPENROUTER_API_KEY", "secret-key");
-    globalThis.fetch = vi.fn().mockResolvedValue(Response.json({ choices: [{ message: { content: null, tool_calls: [
-      { id: "call-a", type: "function", function: { name: "lookup", arguments: "{\"q\":1}" } },
-      { id: "call-b", type: "function", function: { name: "lookup", arguments: "{}" } },
-    ] } }] }));
+    globalThis.fetch = vi.fn().mockResolvedValue(Response.json({
+      choices: [{
+        message: {
+          content: null, tool_calls: [
+            { id: "call-a", type: "function", function: { name: "lookup", arguments: "{\"q\":1}" } },
+            { id: "call-b", type: "function", function: { name: "lookup", arguments: "{}" } },
+          ]
+        }
+      }]
+    }));
     const result = [];
     for await (const item of new OpenRouterLlm().generateContentAsync(request())) result.push(item);
     expect(result[0].content?.parts).toEqual([{ functionCall: { id: "call-a", name: "lookup", args: { q: 1 } } }, { functionCall: { id: "call-b", name: "lookup", args: {} } }]);
@@ -133,6 +139,253 @@ describe("OpenRouterLlm", () => {
     vi.stubEnv("OPENROUTER_MODEL", "provider/model");
     const llm = new OpenRouterLlm();
     await expect(llm.connect()).rejects.toMatchObject({ code: "UNSUPPORTED" });
-    await expect(async () => { for await (const item of llm.generateContentAsync(request(), true)) { void item; } }).rejects.toMatchObject({ code: "UNSUPPORTED" });
+  });
+
+  it("streams text SSE chunks progressively and yields final turn-complete response", async () => {
+    vi.stubEnv("OPENROUTER_MODEL", "provider/model");
+    vi.stubEnv("OPENROUTER_API_KEY", "secret-key");
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Hello "}}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"world!"}}]}\n\n'));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const fetch = vi.fn().mockResolvedValue(new Response(stream, { headers: { "Content-Type": "text/event-stream" } }));
+    globalThis.fetch = fetch;
+
+    const items = [];
+    for await (const item of new OpenRouterLlm().generateContentAsync(request([{ role: "user", parts: [{ text: "hi" }] }]), true)) {
+      items.push(item);
+    }
+
+    expect(items).toHaveLength(3);
+    expect(items[0]).toEqual({
+      content: { role: "model", parts: [{ text: "Hello " }] },
+      partial: true,
+    });
+    expect(items[1]).toEqual({
+      content: { role: "model", parts: [{ text: "world!" }] },
+      partial: true,
+    });
+    expect(items[2]).toEqual({
+      content: { role: "model", parts: [{ text: "Hello world!" }] },
+      partial: false,
+      turnComplete: true,
+    });
+
+    const body = JSON.parse(fetch.mock.calls[0][1].body as string);
+    expect(body.stream).toBe(true);
+    expect(body.provider).toEqual({ zdr: true, data_collection: "deny", require_parameters: true, allow_fallbacks: false });
+  });
+
+  it("handles multi-byte UTF-8 characters split across chunk boundaries", async () => {
+    vi.stubEnv("OPENROUTER_MODEL", "provider/model");
+    vi.stubEnv("OPENROUTER_API_KEY", "secret-key");
+
+    // "✨" is 3 bytes: 0xE2, 0x9C, 0xA8
+    const part1 = new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Sparkle: \u2728"}}]}\n\n');
+    // Split the stream right in the middle of a multi-byte sequence
+    const slicePoint = part1.length - 6; // inside the encoded character
+    const chunkA = part1.slice(0, slicePoint);
+    const chunkB = part1.slice(slicePoint);
+
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(chunkA);
+        controller.enqueue(chunkB);
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(stream, { headers: { "Content-Type": "text/event-stream" } }));
+
+    const items = [];
+    for await (const item of new OpenRouterLlm().generateContentAsync(request(), true)) {
+      items.push(item);
+    }
+
+    expect(items.length).toBeGreaterThanOrEqual(1);
+    const lastItem = items[items.length - 1];
+    expect(lastItem.partial).toBe(false);
+    expect((lastItem.content?.parts?.[0] as { text: string })?.text).toContain("✨");
+  });
+
+  it("assembles fragmented tool call arguments across multiple streaming chunks", async () => {
+    vi.stubEnv("OPENROUTER_MODEL", "provider/model");
+    vi.stubEnv("OPENROUTER_API_KEY", "secret-key");
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        // Chunk 1: Tool call ID and function name
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"lookup","arguments":"{\\"query\\":"}}]}}]}\n\n'));
+        // Chunk 2: Fragmented argument
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"important\\"}"}}]}}]}\n\n'));
+        // Chunk 3: DONE
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(stream, { headers: { "Content-Type": "text/event-stream" } }));
+
+    const items = [];
+    for await (const item of new OpenRouterLlm().generateContentAsync(request(), true)) {
+      items.push(item);
+    }
+
+    // Tool call must NOT be emitted until completely assembled and validated
+    expect(items).toHaveLength(1);
+    expect(items[0]).toEqual({
+      content: {
+        role: "model",
+        parts: [{ functionCall: { id: "call_123", name: "lookup", args: { query: "important" } } }],
+      },
+      partial: false,
+    });
+  });
+
+  it("assembles parallel multiple tool calls correctly", async () => {
+    vi.stubEnv("OPENROUTER_MODEL", "provider/model");
+    vi.stubEnv("OPENROUTER_API_KEY", "secret-key");
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"lookup","arguments":"{\\"q\\":1}"}},{"index":1,"id":"call-2","function":{"name":"lookup","arguments":"{\\"q\\":2}"}}]}}]}\n\n'));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(stream, { headers: { "Content-Type": "text/event-stream" } }));
+
+    const items = [];
+    for await (const item of new OpenRouterLlm().generateContentAsync(request(), true)) {
+      items.push(item);
+    }
+
+    expect(items).toHaveLength(1);
+    expect(items[0].content?.parts).toEqual([
+      { functionCall: { id: "call-1", name: "lookup", args: { q: 1 } } },
+      { functionCall: { id: "call-2", name: "lookup", args: { q: 2 } } },
+    ]);
+  });
+
+  it("supports multiple tool rounds with tool results and streaming follow-up", async () => {
+    vi.stubEnv("OPENROUTER_MODEL", "provider/model");
+    vi.stubEnv("OPENROUTER_API_KEY", "secret-key");
+
+    const encoder = new TextEncoder();
+    // First round stream: yields tool call
+    const stream1 = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"round1-call","function":{"name":"lookup","arguments":"{\\"topic\\":\\"testing\\"}"}}]}}]}\n\n'));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    // Second round stream: yields follow-up text
+    const stream2 = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Found test results."}}]}\n\n'));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(stream1, { headers: { "Content-Type": "text/event-stream" } }))
+      .mockResolvedValueOnce(new Response(stream2, { headers: { "Content-Type": "text/event-stream" } }));
+    globalThis.fetch = fetchMock;
+
+    const llm = new OpenRouterLlm();
+
+    // Round 1
+    const round1Items = [];
+    for await (const item of llm.generateContentAsync(request([{ role: "user", parts: [{ text: "find info" }] }]), true)) {
+      round1Items.push(item);
+    }
+    expect(round1Items).toHaveLength(1);
+    expect(round1Items[0].content?.parts).toEqual([
+      { functionCall: { id: "round1-call", name: "lookup", args: { topic: "testing" } } },
+    ]);
+
+    // Round 2 (with tool result)
+    const historyWithToolResult: LlmRequest["contents"] = [
+      { role: "user", parts: [{ text: "find info" }] },
+      { role: "model", parts: [{ functionCall: { id: "round1-call", name: "lookup", args: { topic: "testing" } } }] },
+      { role: "user", parts: [{ functionResponse: { id: "round1-call", name: "lookup", response: { count: 3 } } }] },
+    ];
+    const round2Items = [];
+    for await (const item of llm.generateContentAsync(request(historyWithToolResult), true)) {
+      round2Items.push(item);
+    }
+    expect(round2Items).toHaveLength(2); // partial delta + final complete
+    expect(round2Items[1].content?.parts).toEqual([{ text: "Found test results." }]);
+
+    // Verify messages sent to OpenRouter in round 2 included the tool result
+    const round2Body = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    expect(round2Body.messages).toContainEqual({
+      role: "tool",
+      tool_call_id: "round1-call",
+      content: JSON.stringify({ count: 3 }),
+    });
+  });
+
+  it("sanitizes in-stream error events safely", async () => {
+    vi.stubEnv("OPENROUTER_MODEL", "provider/model");
+    vi.stubEnv("OPENROUTER_API_KEY", "secret-key");
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"error":{"code":429,"message":"Rate limit exceeded for user sk-or-secret"}}\n\n'));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(stream, { headers: { "Content-Type": "text/event-stream" } }));
+
+    let caught: unknown;
+    try {
+      for await (const item of new OpenRouterLlm().generateContentAsync(request(), true)) {
+        void item;
+      }
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(OpenRouterError);
+    expect((caught as OpenRouterError).diagnostics).toMatchObject({
+      stage: "OpenRouter response",
+      category: "rate limit",
+      openRouterErrorCode: 429,
+    });
+    expect(JSON.stringify((caught as OpenRouterError).diagnostics)).not.toMatch(/secret|sk-or/i);
+  });
+
+  it("sanitizes malformed in-stream JSON safely", async () => {
+    vi.stubEnv("OPENROUTER_MODEL", "provider/model");
+    vi.stubEnv("OPENROUTER_API_KEY", "secret-key");
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: {invalid-json\n\n"));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(stream, { headers: { "Content-Type": "text/event-stream" } }));
+
+    await expect(async () => {
+      for await (const item of new OpenRouterLlm().generateContentAsync(request(), true)) {
+        void item;
+      }
+    }).rejects.toMatchObject({
+      code: "UPSTREAM",
+      diagnostics: expect.objectContaining({ category: "invalid response" }),
+    });
   });
 });

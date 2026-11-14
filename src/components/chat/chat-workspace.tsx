@@ -2,7 +2,7 @@
 
 import { useEffect, useReducer, useRef, useState } from "react";
 
-import { sendChatMessage } from "@/components/chat/chat-api";
+import { streamChatMessage } from "@/components/chat/chat-api";
 import { type Account as AccountType } from "@/components/chat/account-selector";
 import { ChatComposer } from "@/components/chat/chat-composer";
 import { chatReducer, initialChatState } from "@/components/chat/chat-state";
@@ -55,6 +55,9 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
 
   const requestVersion = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isUserScrolledUp = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleRefreshAccounts = async () => {
     setIsAccountsLoading(true);
@@ -110,8 +113,18 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
     };
   }, []);
 
+  // Smart auto-scrolling
+  const handleScroll = () => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    isUserScrolledUp.current = !isNearBottom;
+  };
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!isUserScrolledUp.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [chatState.messages, chatState.isLoading, chatState.error]);
 
   useEffect(() => {
@@ -145,6 +158,8 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
   }, []);
 
   const handleNewChat = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
     requestVersion.current += 1;
     setActiveConversationId(null);
     setSessionId(createSessionId());
@@ -152,21 +167,22 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
     setIsSidebarOpen(false);
   };
 
-  const handleSubmit = async () => {
-    if (chatState.isLoading || !chatState.composerValue.trim()) {
+  const submitMessage = async (messageText: string) => {
+    if (chatState.isLoading || !messageText.trim()) {
       return;
     }
 
-    const message = chatState.composerValue;
+    const message = messageText.trim();
     const activeSessionId = sessionId ?? createSessionId();
     if (sessionId === null) {
       setSessionId(activeSessionId);
     }
+
     try {
       if (!activeConversationId) {
         const { conversation } = await createConversation({
           sessionId: activeSessionId,
-          title: message.trim().slice(0, 80),
+          title: message.slice(0, 80),
           account,
         });
         setActiveConversationId(conversation.id);
@@ -180,28 +196,76 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
       return;
     }
 
+    isUserScrolledUp.current = false;
     const currentRequestVersion = requestVersion.current;
-    dispatch({ type: "submit", message, messageId: crypto.randomUUID() });
+    const userMsgId = crypto.randomUUID();
+    const assistantMsgId = crypto.randomUUID();
 
-    void sendChatMessage(message, activeSessionId, account)
-      .then((content) => {
+    dispatch({ type: "submit", message, messageId: userMsgId });
+    dispatch({ type: "stream-start", messageId: assistantMsgId });
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    void streamChatMessage({
+      message,
+      sessionId: activeSessionId,
+      account,
+      signal: controller.signal,
+      onActivity: (activity) => {
         if (requestVersion.current === currentRequestVersion) {
-          dispatch({
-            type: "assistant-response",
-            message: { content, id: crypto.randomUUID(), role: "assistant" },
-          });
+          dispatch({ type: "stream-activity", activity });
+        }
+      },
+      onApprovalRequired: (approval) => {
+        if (requestVersion.current === currentRequestVersion) {
+          dispatch({ type: "stream-approval", approval });
+        }
+      },
+      onTextDelta: (text) => {
+        if (requestVersion.current === currentRequestVersion) {
+          dispatch({ type: "stream-delta", text });
+        }
+      },
+      onFinal: (messageId) => {
+        if (requestVersion.current === currentRequestVersion) {
+          dispatch({ type: "stream-final", messageId });
           void listConversations().then(({ conversations: loadedConversations }) => setConversations(loadedConversations));
         }
-      })
-      .catch((error: unknown) => {
-        if (requestVersion.current !== currentRequestVersion) {
-          return;
+      },
+      onError: (errorMessage) => {
+        if (requestVersion.current === currentRequestVersion && !controller.signal.aborted) {
+          dispatch({ type: "stream-error", message: errorMessage });
         }
-        dispatch({
-          type: "request-failed",
-          message: error instanceof Error ? error.message : "The assistant request failed.",
-        });
+      },
+    }).catch((error: unknown) => {
+      if (requestVersion.current !== currentRequestVersion || controller.signal.aborted) {
+        return;
+      }
+      dispatch({
+        type: "request-failed",
+        message: error instanceof Error ? error.message : "The assistant request failed.",
       });
+    });
+  };
+
+  const handleSubmit = () => {
+    void submitMessage(chatState.composerValue);
+  };
+
+  const handleStopGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    dispatch({ type: "stream-abort" });
+  };
+
+  const handleConfirmApproval = (approvalId: string) => {
+    void submitMessage(`CONFIRM ${approvalId}`);
   };
 
   const handleAccountChange = (nextAccount: AccountType) => {
@@ -216,6 +280,8 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
   };
 
   const handleSelectConversation = (conversation: ConversationSummary) => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
     requestVersion.current += 1;
     setActiveConversationId(conversation.id);
     setSessionId(conversation.sessionId);
@@ -306,12 +372,27 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
           {chatState.messages.length === 0 ? (
             <EmptyState onPromptSelect={(prompt) => dispatch({ type: "composer-changed", value: prompt })} />
           ) : (
-            <div aria-live="polite" className="min-h-0 flex-1 overflow-y-auto py-8 sm:py-10">
+            <div
+              aria-live="polite"
+              className="min-h-0 flex-1 overflow-y-auto py-8 sm:py-10"
+              onScroll={handleScroll}
+              ref={scrollContainerRef}
+            >
               <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
                 {chatState.messages.map((message) => (
-                  <Message content={message.content} key={message.id} role={message.role} />
+                  <Message
+                    activities={message.activities}
+                    content={message.content}
+                    isStreaming={message.isStreaming}
+                    key={message.id}
+                    onConfirmApproval={handleConfirmApproval}
+                    pendingApproval={message.pendingApproval}
+                    role={message.role}
+                  />
                 ))}
-                {chatState.isLoading && <LoadingState />}
+                {chatState.isLoading && !chatState.messages.some((m) => m.role === "assistant" && m.isStreaming) && (
+                  <LoadingState />
+                )}
                 {chatState.error && <ErrorState message={chatState.error} />}
                 <div ref={messagesEndRef} />
               </div>
@@ -327,6 +408,7 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
               isLoading={chatState.isLoading}
               onAccountChange={setAccount}
               onChange={(value) => dispatch({ type: "composer-changed", value })}
+              onStop={handleStopGeneration}
               onSubmit={handleSubmit}
               value={chatState.composerValue}
             />

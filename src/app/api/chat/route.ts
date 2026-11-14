@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 
-import type { Event } from "@google/adk";
+import {
+  getFunctionCalls,
+  getFunctionResponses,
+  StreamingMode,
+  type Event,
+} from "@google/adk";
 import {
   databaseErrorResponse,
   logRequestFailure,
@@ -41,6 +46,10 @@ import {
   hydrateSession,
   MAX_HISTORY_MESSAGES,
 } from "../../../lib/adk/session-hydration";
+import {
+  extractPendingApproval,
+  mapToolToActivityLabel,
+} from "../../../lib/adk/activity-mapper";
 
 const DEFAULT_TIMEOUT_MS = 150_000;
 export const maxDuration = 180;
@@ -68,6 +77,7 @@ type ChatRequest = {
   message: string;
   sessionId: string;
   account: string;
+  stream?: boolean;
 };
 
 function getTimeoutMs(): number {
@@ -95,12 +105,36 @@ function isChatRequest(value: unknown): value is ChatRequest {
     typeof request.sessionId === "string" &&
     isUuid(request.sessionId.trim()) &&
     typeof request.account === "string" &&
-    isAccount(request.account)
+    isAccount(request.account) &&
+    (request.stream === undefined || typeof request.stream === "boolean")
   );
 }
 
 function errorResponse(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
+}
+
+function ssePayload(payload: Record<string, unknown>): string {
+  return `data: ${JSON.stringify(payload)}\n\n`;
+}
+
+function createSseResponse(
+  stream: ReadableStream,
+  requestId: string,
+  conversationId: string,
+): Response {
+  const headers = new Headers({
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+    "X-Request-ID": requestId,
+  });
+  headers.set(
+    "Set-Cookie",
+    `${ACTIVE_CONVERSATION_COOKIE}=${conversationId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 365}${process.env.NODE_ENV === "production" ? "; Secure" : ""}`,
+  );
+  return new Response(stream, { headers });
 }
 
 async function handlePost(request: Request, requestId: string) {
@@ -133,6 +167,10 @@ async function handlePost(request: Request, requestId: string) {
       return errorResponse("Invalid chat request.", 400);
     }
   }
+
+  const isStreamingRequested =
+    request.headers.get("accept")?.includes("text/event-stream") ||
+    body.stream === true;
 
   let conversation;
   try {
@@ -172,6 +210,75 @@ async function handlePost(request: Request, requestId: string) {
     // 1. Check for explicit confirmation command before invoking LLM
     const confirmationId = parseConfirmationCommand(body.message);
     if (confirmationId) {
+      if (isStreamingRequested) {
+        const stream = new ReadableStream({
+          async start(controller) {
+            const encoder = new TextEncoder();
+            const send = (data: Record<string, unknown>) => {
+              try {
+                controller.enqueue(encoder.encode(ssePayload(data)));
+              } catch {}
+            };
+
+            send({ type: "start", requestId });
+
+            try {
+              await appendMessage({
+                conversationId: conversation.id,
+                role: "user",
+                content: body.message.trim(),
+              });
+
+              const result = await handleConfirmation({
+                approvalId: confirmationId,
+                user: authenticatedUser,
+                conversation,
+                selectedAccount: body.account,
+              });
+
+              const saved = await appendMessage({
+                conversationId: conversation.id,
+                role: "assistant",
+                content: result.output,
+              });
+
+              send({ type: "text_delta", text: result.output });
+              send({
+                type: "final",
+                messageId: saved && typeof saved === "object" && "id" in saved ? saved.id : randomUUID(),
+              });
+            } catch (error) {
+              logRequestFailure(requestId, "confirmation");
+              let errMsg = "The confirmation could not be completed.";
+              if (
+                error instanceof GoogleAuthorizationError &&
+                (error.code === "RECONNECT_REQUIRED" ||
+                  error.code === "SCOPE_REQUIRED")
+              ) {
+                errMsg =
+                  "Google authorization is required. Please reconnect or grant the required access.";
+              } else if (error instanceof GoogleAuthorizationError) {
+                errMsg = "The Google operation could not be completed.";
+              } else if (
+                error instanceof Error &&
+                (error.message.startsWith("This approval") ||
+                  error.message.startsWith("Write confirmations") ||
+                  error.message.startsWith("Account mismatch"))
+              ) {
+                errMsg = error.message.startsWith("This approval")
+                  ? "This approval is no longer available."
+                  : "The selected account does not match this approval.";
+              }
+              send({ type: "error", error: errMsg });
+            } finally {
+              controller.close();
+            }
+          },
+        });
+        return createSseResponse(stream, requestId, conversation.id);
+      }
+
+      // Non-streaming confirmation
       try {
         await appendMessage({
           conversationId: conversation.id,
@@ -279,13 +386,49 @@ async function handlePost(request: Request, requestId: string) {
       .filter((label): label is string => label !== null);
 
     if (connectedLabels.length === 0) {
-      const output = "No Google account is connected. Connect a Google account before I can access Gmail, Calendar, or Docs.";
+      const output =
+        "No Google account is connected. Connect a Google account before I can access Gmail, Calendar, or Docs.";
+      let savedMessage;
       try {
-        await appendMessage({ conversationId: conversation.id, role: "assistant", content: output });
+        savedMessage = await appendMessage({
+          conversationId: conversation.id,
+          role: "assistant",
+          content: output,
+        });
       } catch (error) {
         logRequestFailure(requestId, "database");
         return databaseErrorResponse(error, requestId);
       }
+
+      if (isStreamingRequested) {
+        const stream = new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder();
+            controller.enqueue(
+              encoder.encode(ssePayload({ type: "start", requestId })),
+            );
+            controller.enqueue(
+              encoder.encode(ssePayload({ type: "text_delta", text: output })),
+            );
+            controller.enqueue(
+              encoder.encode(
+                ssePayload({
+                  type: "final",
+                  messageId:
+                    savedMessage &&
+                    typeof savedMessage === "object" &&
+                    "id" in savedMessage
+                      ? savedMessage.id
+                      : randomUUID(),
+                }),
+              ),
+            );
+            controller.close();
+          },
+        });
+        return createSseResponse(stream, requestId, conversation.id);
+      }
+
       const response = NextResponse.json({ output });
       response.cookies.set(ACTIVE_CONVERSATION_COOKIE, conversation.id, {
         httpOnly: true,
@@ -325,6 +468,176 @@ async function handlePost(request: Request, requestId: string) {
       return errorResponse("Conversation history could not be prepared.", 502);
     }
 
+    if (isStreamingRequested) {
+      const stream = new ReadableStream({
+        async start(streamController) {
+          const encoder = new TextEncoder();
+          const send = (data: Record<string, unknown>) => {
+            try {
+              streamController.enqueue(encoder.encode(ssePayload(data)));
+            } catch {}
+          };
+
+          send({ type: "start", requestId });
+
+          const controller = new AbortController();
+          const onClientAbort = () => controller.abort();
+          request.signal.addEventListener("abort", onClientAbort);
+          const timeout = setTimeout(() => controller.abort(), getTimeoutMs());
+
+          const events: Event[] = [];
+          let accumulatedText = "";
+          let completedNormally = false;
+
+          try {
+            for await (const event of runner.runAsync({
+              userId: authenticatedUser.id,
+              sessionId: conversation.id,
+              newMessage: {
+                role: "user",
+                parts: [
+                  {
+                    text: `${accountInstruction(body.account, connectedLabels)}\n\n${body.message.trim()}`,
+                  },
+                ],
+              },
+              runConfig: { streamingMode: StreamingMode.SSE },
+              abortSignal: controller.signal,
+            })) {
+              events.push(event);
+
+              // 1. Tool execution running
+              const functionCalls = getFunctionCalls(event);
+              if (functionCalls.length > 0) {
+                for (const call of functionCalls) {
+                  const { label } = mapToolToActivityLabel(call.name ?? "");
+                  send({
+                    type: "activity",
+                    id: call.id ?? randomUUID(),
+                    label,
+                    status: "running",
+                  });
+                }
+              }
+
+              // 2. Tool response returned
+              const functionResponses = getFunctionResponses(event);
+              if (functionResponses.length > 0) {
+                for (const resp of functionResponses) {
+                  const isError =
+                    resp.response &&
+                    typeof resp.response === "object" &&
+                    "error" in (resp.response as Record<string, unknown>);
+                  const { label } = mapToolToActivityLabel(resp.name ?? "");
+                  send({
+                    type: "activity",
+                    id: resp.id ?? randomUUID(),
+                    label,
+                    status: isError ? "failed" : "completed",
+                  });
+
+                  const approval = extractPendingApproval(resp.response);
+                  if (approval) {
+                    send({
+                      type: "approval_required",
+                      approvalId: approval.approvalId,
+                      operation: approval.operation,
+                      account: approval.account,
+                      expiresAt: approval.expiresAt,
+                      details: approval.details,
+                    });
+                  }
+                }
+              }
+
+              // 3. Streaming text delta
+              if (event.partial && event.content?.parts) {
+                for (const part of event.content.parts) {
+                  if (typeof part.text === "string" && part.text) {
+                    accumulatedText += part.text;
+                    send({ type: "text_delta", text: part.text });
+                  }
+                }
+              }
+            }
+
+            completedNormally = true;
+          } catch (error) {
+            if (
+              controller.signal.aborted ||
+              (error instanceof DOMException && error.name === "AbortError")
+            ) {
+              if (request.signal.aborted) {
+                send({
+                  type: "activity",
+                  id: "cancel",
+                  label: "Cancelled by user",
+                  status: "cancelled",
+                });
+              } else {
+                logRequestFailure(requestId, "agent_timeout");
+                send({ type: "error", error: "The agent request timed out." });
+              }
+            } else if (error instanceof GoogleAuthorizationError) {
+              logRequestFailure(requestId, "google_authorization");
+              send({
+                type: "error",
+                error:
+                  "Google authorization is required. Please reconnect or grant the required access.",
+              });
+            } else if (
+              error instanceof OpenRouterError &&
+              error.code === "TIMEOUT"
+            ) {
+              logRequestFailure(requestId, "openrouter_timeout");
+              send({ type: "error", error: "The agent request timed out." });
+            } else {
+              logRequestFailure(requestId, "agent_provider");
+              send({
+                type: "error",
+                error: "The assistant could not complete your request.",
+              });
+            }
+          } finally {
+            clearTimeout(timeout);
+            request.signal.removeEventListener("abort", onClientAbort);
+          }
+
+          if (completedNormally) {
+            const assistantText =
+              extractFinalResponse(events) ||
+              accumulatedText ||
+              "I was unable to complete your request.";
+            try {
+              const saved = await appendMessage({
+                conversationId: conversation.id,
+                role: "assistant",
+                content: assistantText,
+              });
+              send({
+                type: "final",
+                messageId:
+                  saved && typeof saved === "object" && "id" in saved
+                    ? saved.id
+                    : randomUUID(),
+              });
+            } catch {
+              logRequestFailure(requestId, "database");
+              send({
+                type: "error",
+                error: "The assistant response could not be saved.",
+              });
+            }
+          }
+
+          streamController.close();
+        },
+      });
+
+      return createSseResponse(stream, requestId, conversation.id);
+    }
+
+    // Non-streaming normal agent path
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), getTimeoutMs());
     const events: Event[] = [];
@@ -337,7 +650,7 @@ async function handlePost(request: Request, requestId: string) {
           role: "user",
           parts: [
             {
-          text: `${accountInstruction(body.account, connectedLabels)}\n\n${body.message.trim()}`,
+              text: `${accountInstruction(body.account, connectedLabels)}\n\n${body.message.trim()}`,
             },
           ],
         },

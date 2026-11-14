@@ -72,4 +72,91 @@ describe("chat state", () => {
 
     expect(state).toEqual(initialChatState);
   });
+
+  describe("streaming actions", () => {
+    it("handles stream-start, stream-activity, stream-approval, stream-delta, and stream-final", () => {
+      let state = chatReducer(initialChatState, {
+        type: "submit",
+        message: "Send email",
+        messageId: "u-1",
+      });
+
+      state = chatReducer(state, {
+        type: "stream-start",
+        messageId: "a-temp",
+      });
+
+      expect(state.messages).toHaveLength(2);
+      expect(state.messages[1]).toEqual({
+        id: "a-temp",
+        role: "assistant",
+        content: "",
+        activities: [],
+        isStreaming: true,
+      });
+
+      // Activity: running
+      state = chatReducer(state, {
+        type: "stream-activity",
+        activity: { id: "act-1", label: "Searching Gmail", status: "running" },
+      });
+      expect(state.messages[1].activities).toEqual([
+        { id: "act-1", label: "Searching Gmail", status: "running" },
+      ]);
+
+      // Activity: completed update
+      state = chatReducer(state, {
+        type: "stream-activity",
+        activity: { id: "act-1", label: "Searching Gmail", status: "completed" },
+      });
+      expect(state.messages[1].activities).toEqual([
+        { id: "act-1", label: "Searching Gmail", status: "completed" },
+      ]);
+
+      // Approval required
+      state = chatReducer(state, {
+        type: "stream-approval",
+        approval: {
+          approvalId: "app-1",
+          account: "personal",
+          operation: "gmail.send",
+          expiresAt: "2026-11-15T00:00:00Z",
+          details: { to: "bob@example.com" },
+        },
+      });
+      expect(state.messages[1].pendingApproval).toMatchObject({ approvalId: "app-1" });
+
+      // Progressive text deltas
+      state = chatReducer(state, { type: "stream-delta", text: "I have " });
+      state = chatReducer(state, { type: "stream-delta", text: "prepared the draft." });
+      expect(state.messages[1].content).toBe("I have prepared the draft.");
+      expect(state.messages[1].isStreaming).toBe(true);
+
+      // Final
+      state = chatReducer(state, { type: "stream-final", messageId: "a-final" });
+      expect(state.isLoading).toBe(false);
+      expect(state.messages[1].id).toBe("a-final");
+      expect(state.messages[1].isStreaming).toBe(false);
+    });
+
+    it("handles stream-abort by cancelling running activities and clearing loading", () => {
+      let state = chatReducer(initialChatState, {
+        type: "submit",
+        message: "Long task",
+        messageId: "u-1",
+      });
+      state = chatReducer(state, { type: "stream-start", messageId: "a-1" });
+      state = chatReducer(state, {
+        type: "stream-activity",
+        activity: { id: "act-1", label: "Searching Gmail", status: "running" },
+      });
+
+      state = chatReducer(state, { type: "stream-abort" });
+      expect(state.isLoading).toBe(false);
+      expect(state.messages[1].isStreaming).toBe(false);
+      expect(state.messages[1].activities).toEqual([
+        { id: "act-1", label: "Searching Gmail", status: "cancelled" },
+      ]);
+    });
+  });
 });

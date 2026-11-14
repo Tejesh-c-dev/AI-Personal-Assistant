@@ -55,10 +55,10 @@ import { GoogleAuthorizationError } from "../../../lib/google-api";
 
 const originalFetch = globalThis.fetch;
 
-function makeRequest(body: unknown) {
+function makeRequest(body: unknown, headers: Record<string, string> = {}) {
   return new Request("http://localhost/api/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -569,6 +569,284 @@ describe("POST /api/chat", () => {
       expect(response.status).toBe(403);
       expect(body).not.toContain("RECONNECT_REQUIRED");
       expect(response.headers.get("X-Request-ID")).toBeTruthy();
+    });
+  });
+
+  describe("Real-time Streaming over SSE", () => {
+    function parseSseEvents(text: string): Array<Record<string, unknown>> {
+      const events: Array<Record<string, unknown>> = [];
+      const lines = text.split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data:")) {
+          try {
+            events.push(JSON.parse(trimmed.slice(5).trim()));
+          } catch {}
+        }
+      }
+      return events;
+    }
+
+    it("streams events over SSE when requested via Accept header", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      vi.mocked(auth.listGoogleAccounts).mockResolvedValueOnce([{ label: "personal", status: "active" }] as never);
+
+      const mockRunAsync = async function* () {
+        yield createEvent({
+          invocationId: "inv-1",
+          author: "personal_assistant",
+          content: { role: "model", parts: [{ text: "Hello " }] },
+          partial: true,
+        });
+        yield createEvent({
+          invocationId: "inv-2",
+          author: "personal_assistant",
+          content: { role: "model", parts: [{ text: "from stream!" }] },
+          partial: true,
+        });
+        yield createEvent({
+          invocationId: "inv-3",
+          author: "personal_assistant",
+          content: { role: "model", parts: [{ text: "Hello from stream!" }] },
+          partial: false,
+          turnComplete: true,
+        });
+      };
+
+      adkMocks.createRunner.mockReturnValueOnce({
+        runner: { runAsync: mockRunAsync },
+        sessionService: { createSession: vi.fn().mockResolvedValue({ events: [] }), appendEvent: vi.fn() },
+        appName: "ai-personal-assistant",
+      });
+
+      const response = await POST(
+        makeRequest(
+          { message: "Hi", sessionId: "00000000-0000-4000-8000-000000000002", account: "personal" },
+          { Accept: "text/event-stream" },
+        ),
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toContain("text/event-stream");
+      expect(response.headers.get("X-Request-ID")).toBeTruthy();
+
+      const text = await response.text();
+      const events = parseSseEvents(text);
+
+      expect(events[0]).toMatchObject({ type: "start" });
+      expect(events[1]).toEqual({ type: "text_delta", text: "Hello " });
+      expect(events[2]).toEqual({ type: "text_delta", text: "from stream!" });
+      expect(events[3]).toMatchObject({ type: "final", messageId: expect.any(String) });
+
+      // Verify user message and final assistant message persisted
+      expect(conversationRepository.appendMessage).toHaveBeenCalledWith({
+        conversationId: "00000000-0000-4000-8000-000000000001",
+        role: "user",
+        content: "Hi",
+      });
+      expect(conversationRepository.appendMessage).toHaveBeenCalledWith({
+        conversationId: "00000000-0000-4000-8000-000000000001",
+        role: "assistant",
+        content: "Hello from stream!",
+      });
+    });
+
+    it("emits tool activities and approval preview cards during streaming", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      vi.mocked(auth.listGoogleAccounts).mockResolvedValueOnce([{ label: "personal", status: "active" }] as never);
+
+      const mockRunAsync = async function* () {
+        // Model requests tool call
+        yield createEvent({
+          invocationId: "inv-call",
+          author: "personal_assistant",
+          content: {
+            role: "model",
+            parts: [{ functionCall: { id: "call-gmail", name: "personal_gmail_search", args: { query: "tax" } } }],
+          },
+          partial: false,
+        });
+
+        // Tool execution result
+        yield createEvent({
+          invocationId: "inv-resp",
+          author: "personal_assistant",
+          content: {
+            role: "user",
+            parts: [{ functionResponse: { id: "call-gmail", name: "personal_gmail_search", response: { messages: [] } } }],
+          },
+          partial: false,
+        });
+
+        // Model requests proposal tool
+        yield createEvent({
+          invocationId: "inv-prop",
+          author: "personal_assistant",
+          content: {
+            role: "model",
+            parts: [{ functionCall: { id: "call-prop", name: "personal_propose_send_email", args: { to: "a@b.com" } } }],
+          },
+          partial: false,
+        });
+
+        // Proposal response
+        yield createEvent({
+          invocationId: "inv-prop-resp",
+          author: "personal_assistant",
+          content: {
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  id: "call-prop",
+                  name: "personal_propose_send_email",
+                  response: {
+                    approvalId: "app-test-uuid",
+                    expiresAt: "2026-11-15T00:00:00Z",
+                    status: "pending_confirmation",
+                    proposedEmail: {
+                      account: "personal",
+                      to: "a@b.com",
+                      subject: "Draft",
+                      bodyPreview: "Hello",
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          partial: false,
+        });
+
+        // Final text delta & completion
+        yield createEvent({
+          invocationId: "inv-text",
+          author: "personal_assistant",
+          content: { role: "model", parts: [{ text: "Proposal ready." }] },
+          partial: true,
+        });
+        yield createEvent({
+          invocationId: "inv-done",
+          author: "personal_assistant",
+          content: { role: "model", parts: [{ text: "Proposal ready." }] },
+          partial: false,
+          turnComplete: true,
+        });
+      };
+
+      adkMocks.createRunner.mockReturnValueOnce({
+        runner: { runAsync: mockRunAsync },
+        sessionService: { createSession: vi.fn().mockResolvedValue({ events: [] }), appendEvent: vi.fn() },
+        appName: "ai-personal-assistant",
+      });
+
+      const response = await POST(
+        makeRequest(
+          { message: "Search tax and send email", sessionId: "00000000-0000-4000-8000-000000000002", account: "personal" },
+          { Accept: "text/event-stream" },
+        ),
+      );
+
+      const events = parseSseEvents(await response.text());
+
+      // 1. Tool 1 running & completed
+      expect(events).toContainEqual({
+        type: "activity",
+        id: "call-gmail",
+        label: "Searching Gmail",
+        status: "running",
+      });
+      expect(events).toContainEqual({
+        type: "activity",
+        id: "call-gmail",
+        label: "Searching Gmail",
+        status: "completed",
+      });
+
+      // 2. Proposal tool running & completed
+      expect(events).toContainEqual({
+        type: "activity",
+        id: "call-prop",
+        label: "Preparing email approval",
+        status: "running",
+      });
+      expect(events).toContainEqual({
+        type: "activity",
+        id: "call-prop",
+        label: "Preparing email approval",
+        status: "completed",
+      });
+
+      // 3. Approval preview emitted
+      expect(events).toContainEqual({
+        type: "approval_required",
+        approvalId: "app-test-uuid",
+        operation: "gmail.send",
+        account: "personal",
+        expiresAt: "2026-11-15T00:00:00Z",
+        details: { to: "a@b.com", subject: "Draft", bodyPreview: "Hello" },
+      });
+
+      // 4. Text delta & final
+      expect(events).toContainEqual({ type: "text_delta", text: "Proposal ready." });
+      expect(events[events.length - 1]).toMatchObject({ type: "final" });
+    });
+
+    it("streams confirmation execution over SSE", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      adkMocks.handleConfirmation.mockResolvedValueOnce({ output: "✓ Email sent successfully." });
+
+      const confirmationId = "00000000-0000-4000-8000-000000000099";
+      const response = await POST(
+        makeRequest(
+          { message: `CONFIRM ${confirmationId}`, sessionId: "00000000-0000-4000-8000-000000000002", account: "personal" },
+          { Accept: "text/event-stream" },
+        ),
+      );
+
+      expect(response.status).toBe(200);
+      const events = parseSseEvents(await response.text());
+      expect(events[0]).toMatchObject({ type: "start" });
+      expect(events[1]).toEqual({ type: "text_delta", text: "✓ Email sent successfully." });
+      expect(events[2]).toMatchObject({ type: "final" });
+    });
+
+    it("streams safe error event when confirmation fails", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      adkMocks.handleConfirmation.mockRejectedValueOnce(new Error("This approval has expired"));
+
+      const confirmationId = "00000000-0000-4000-8000-000000000099";
+      const response = await POST(
+        makeRequest(
+          { message: `CONFIRM ${confirmationId}`, sessionId: "00000000-0000-4000-8000-000000000002", account: "personal" },
+          { Accept: "text/event-stream" },
+        ),
+      );
+
+      const events = parseSseEvents(await response.text());
+      expect(events).toContainEqual({
+        type: "error",
+        error: "This approval is no longer available.",
+      });
+    });
+
+    it("streams connection instruction when no Google account is connected", async () => {
+      vi.stubEnv("USE_ADK", "true");
+      vi.mocked(auth.listGoogleAccounts).mockResolvedValueOnce([] as never);
+
+      const response = await POST(
+        makeRequest(
+          { message: "Check email", sessionId: "00000000-0000-4000-8000-000000000002", account: "personal" },
+          { Accept: "text/event-stream" },
+        ),
+      );
+
+      const events = parseSseEvents(await response.text());
+      expect(events[1]).toMatchObject({
+        type: "text_delta",
+        text: "No Google account is connected. Connect a Google account before I can access Gmail, Calendar, or Docs.",
+      });
+      expect(events[2]).toMatchObject({ type: "final" });
     });
   });
 });

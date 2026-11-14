@@ -184,6 +184,12 @@ function toTools(request: LlmRequest): JsonObject[] | undefined {
   return tools.length ? tools : undefined;
 }
 
+interface AssembledToolCall {
+  id: string;
+  name: string;
+  argumentsBuffer: string;
+}
+
 export class OpenRouterLlm extends BaseLlm {
   constructor(model = process.env.OPENROUTER_MODEL?.trim() || "") {
     if (!model) throw new OpenRouterError("CONFIGURATION");
@@ -191,7 +197,6 @@ export class OpenRouterLlm extends BaseLlm {
   }
 
   async *generateContentAsync(request: LlmRequest, stream = false, abortSignal?: AbortSignal): AsyncGenerator<LlmResponse, void> {
-    if (stream) throw new OpenRouterError("UNSUPPORTED");
     const apiKey = process.env.OPENROUTER_API_KEY?.trim();
     if (!apiKey || !this.model) throw new OpenRouterError("CONFIGURATION");
     let endpoint = "https://openrouter.ai/api/v1/chat/completions";
@@ -213,18 +218,20 @@ export class OpenRouterLlm extends BaseLlm {
     const timeout = new AbortController();
     const timeoutId = setTimeout(() => timeout.abort(), Number(process.env.OPENROUTER_TIMEOUT_MS) || 120_000);
     const signal = abortSignal ? AbortSignal.any([abortSignal, timeout.signal]) : timeout.signal;
+
     try {
       const messages = toMessages(request);
       const tools = toTools(request);
       let response: Response;
       try {
         response = await fetch(endpoint, {
-          method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
           body: JSON.stringify({
             model: this.model,
             messages,
             ...(tools ? { tools, tool_choice: "auto" } : {}),
-            stream: false,
+            stream,
             provider: { zdr: true, data_collection: "deny", require_parameters: true, allow_fallbacks: false },
           }),
           signal,
@@ -238,26 +245,202 @@ export class OpenRouterLlm extends BaseLlm {
           httpError: false,
         });
       }
+
       if (!response.ok) throw await responseFailure(response, "OpenRouter response", true);
-      let payload: unknown;
-      try { payload = await response.json(); } catch { throw await responseFailure(response, "response validation", false); }
-      if (record(payload)?.error != null) throw await responseFailure(response, "OpenRouter response", false, payload);
-      const root = record(payload), choices = root?.choices;
-      const first = Array.isArray(choices) ? record(choices[0]) : null;
-      const message = record(first?.message);
-      if (!message || (message.content != null && typeof message.content !== "string") || (message.tool_calls != null && !Array.isArray(message.tool_calls))) throw await responseFailure(response, "response validation", false, payload);
-      const parts: JsonObject[] = [];
-      if (typeof message.content === "string" && message.content) parts.push({ text: message.content });
-      for (const rawCall of (message.tool_calls as unknown[] | undefined) ?? []) {
-        const call = record(rawCall), fn = record(call?.function);
-        if (!call || !fn || typeof call.id !== "string" || typeof fn.name !== "string" || typeof fn.arguments !== "string") throw await responseFailure(response, "response validation", false, payload);
-        let args: unknown;
-        try { args = JSON.parse(fn.arguments); } catch { throw await responseFailure(response, "response validation", false, payload); }
-        if (!record(args)) throw await responseFailure(response, "response validation", false, payload);
-        parts.push({ functionCall: { id: call.id, name: fn.name, args } });
+
+      if (!stream) {
+        let payload: unknown;
+        try { payload = await response.json(); } catch { throw await responseFailure(response, "response validation", false); }
+        if (record(payload)?.error != null) throw await responseFailure(response, "OpenRouter response", false, payload);
+        const root = record(payload), choices = root?.choices;
+        const first = Array.isArray(choices) ? record(choices[0]) : null;
+        const message = record(first?.message);
+        if (!message || (message.content != null && typeof message.content !== "string") || (message.tool_calls != null && !Array.isArray(message.tool_calls))) throw await responseFailure(response, "response validation", false, payload);
+        const parts: JsonObject[] = [];
+        if (typeof message.content === "string" && message.content) parts.push({ text: message.content });
+        for (const rawCall of (message.tool_calls as unknown[] | undefined) ?? []) {
+          const call = record(rawCall), fn = record(call?.function);
+          if (!call || !fn || typeof call.id !== "string" || typeof fn.name !== "string" || typeof fn.arguments !== "string") throw await responseFailure(response, "response validation", false, payload);
+          let args: unknown;
+          try { args = JSON.parse(fn.arguments); } catch { throw await responseFailure(response, "response validation", false, payload); }
+          if (!record(args)) throw await responseFailure(response, "response validation", false, payload);
+          parts.push({ functionCall: { id: call.id, name: fn.name, args } });
+        }
+        if (!parts.length) throw await responseFailure(response, "response validation", false, payload);
+        yield { content: { role: "model", parts } as LlmResponse["content"], turnComplete: true };
+        return;
       }
-      if (!parts.length) throw await responseFailure(response, "response validation", false, payload);
-      yield { content: { role: "model", parts } as LlmResponse["content"], turnComplete: true };
+
+      // --- Streaming SSE Mode ---
+      if (!response.body) throw await responseFailure(response, "response validation", false);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let lineBuffer = "";
+      let accumulatedText = "";
+      const toolCallsByIndex = new Map<number, AssembledToolCall>();
+
+      const processLine = function* (line: string): Generator<LlmResponse, void> {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(":")) return;
+        if (!trimmed.startsWith("data:")) return;
+        const dataStr = trimmed.slice(5).trim();
+        if (dataStr === "[DONE]") return;
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(dataStr);
+        } catch {
+          throw new OpenRouterError("UPSTREAM", {
+            stage: "response validation",
+            category: "invalid response",
+            httpError: false,
+          });
+        }
+
+        const root = record(parsed);
+        if (root?.error != null) {
+          const details = errorDetails(root);
+          const status = typeof details.code === "number" ? details.code : 502;
+          const category = categoryForStatus(status, root);
+          const requestId = safeId(response.headers.get("x-openrouter-generation-id"))
+            ?? safeId(response.headers.get("x-request-id"))
+            ?? safeId(root.id);
+          throw new OpenRouterError("UPSTREAM", {
+            stage: "OpenRouter response",
+            category,
+            httpStatus: typeof details.code === "number" ? details.code : undefined,
+            openRouterErrorCode: details.code,
+            errorType: details.errorType,
+            providerCode: details.providerCode,
+            requestId,
+            httpError: false,
+          });
+        }
+
+        const choices = root?.choices;
+        const first = Array.isArray(choices) ? record(choices[0]) : null;
+        const delta = record(first?.delta);
+        if (!delta) return;
+
+        if (typeof delta.content === "string" && delta.content) {
+          accumulatedText += delta.content;
+          yield {
+            content: {
+              role: "model",
+              parts: [{ text: delta.content }],
+            } as LlmResponse["content"],
+            partial: true,
+          };
+        }
+
+        if (Array.isArray(delta.tool_calls)) {
+          for (const rawCall of delta.tool_calls) {
+            const tc = record(rawCall);
+            if (!tc) continue;
+            const idx = typeof tc.index === "number" ? tc.index : toolCallsByIndex.size;
+            let existing = toolCallsByIndex.get(idx);
+            if (!existing) {
+              existing = { id: "", name: "", argumentsBuffer: "" };
+              toolCallsByIndex.set(idx, existing);
+            }
+            if (typeof tc.id === "string" && tc.id) existing.id = tc.id;
+            const fn = record(tc.function);
+            if (typeof fn?.name === "string" && fn.name) existing.name = fn.name;
+            if (typeof fn?.arguments === "string" && fn.arguments) existing.argumentsBuffer += fn.arguments;
+          }
+        }
+      };
+
+      try {
+        while (true) {
+          let readResult: ReadableStreamReadResult<Uint8Array>;
+          try {
+            readResult = await reader.read();
+          } catch {
+            const cancelled = signal.aborted && abortSignal?.aborted;
+            const timedOut = signal.aborted && !cancelled;
+            throw new OpenRouterError(cancelled ? "REQUEST" : timedOut ? "TIMEOUT" : "UPSTREAM", {
+              stage: "http request",
+              category: timedOut ? "timeout" : "network failure",
+              httpError: false,
+            });
+          }
+
+          if (readResult.done) break;
+          lineBuffer += decoder.decode(readResult.value, { stream: true });
+          const lines = lineBuffer.split("\n");
+          lineBuffer = lines.pop() ?? "";
+          for (const line of lines) {
+            yield* processLine(line);
+          }
+        }
+
+        lineBuffer += decoder.decode();
+        if (lineBuffer.trim()) {
+          yield* processLine(lineBuffer);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      // Finalize assembled tool calls or final text response
+      if (toolCallsByIndex.size > 0) {
+        const parts: JsonObject[] = [];
+        if (accumulatedText.trim()) {
+          parts.push({ text: accumulatedText });
+        }
+        const sortedIndices = Array.from(toolCallsByIndex.keys()).sort((a, b) => a - b);
+        for (const idx of sortedIndices) {
+          const tc = toolCallsByIndex.get(idx)!;
+          if (!tc.id) tc.id = `adk_call_${idx}`;
+          if (!tc.name) {
+            throw new OpenRouterError("UPSTREAM", {
+              stage: "response validation",
+              category: "invalid response",
+              httpError: false,
+            });
+          }
+          let args: unknown = {};
+          if (tc.argumentsBuffer.trim()) {
+            try {
+              args = JSON.parse(tc.argumentsBuffer);
+            } catch {
+              throw new OpenRouterError("UPSTREAM", {
+                stage: "response validation",
+                category: "invalid response",
+                httpError: false,
+              });
+            }
+          }
+          if (!record(args)) {
+            throw new OpenRouterError("UPSTREAM", {
+              stage: "response validation",
+              category: "invalid response",
+              httpError: false,
+            });
+          }
+          parts.push({ functionCall: { id: tc.id, name: tc.name, args } });
+        }
+        yield {
+          content: { role: "model", parts } as LlmResponse["content"],
+          partial: false,
+        };
+      } else if (accumulatedText) {
+        yield {
+          content: {
+            role: "model",
+            parts: [{ text: accumulatedText }],
+          } as LlmResponse["content"],
+          partial: false,
+          turnComplete: true,
+        };
+      } else {
+        throw new OpenRouterError("UPSTREAM", {
+          stage: "response validation",
+          category: "invalid response",
+          httpError: false,
+        });
+      }
     } finally {
       clearTimeout(timeoutId);
     }
