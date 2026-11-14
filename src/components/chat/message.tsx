@@ -1,4 +1,4 @@
-import { Icon } from "@/components/ui/icons";
+import { Icon } from "../ui/icons";
 import { ActivityTimeline } from "./activity-timeline";
 import { ApprovalCard } from "./approval-card";
 import type { ApprovalPreviewData, ToolActivity } from "./chat-state";
@@ -25,15 +25,15 @@ export function Message({
   return (
     <article className={`flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}>
       {!isUser && (
-        <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+        <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-lg border border-[#DCE4ED] bg-[#F1F5F9] text-[#315F85]">
           <Icon className="size-3.5" name="spark" />
         </div>
       )}
       <div
-        className={`max-w-[min(85%,680px)] rounded-2xl px-4 py-3 text-sm leading-6 ${
+        className={`max-w-[min(85%,680px)] px-4 py-3 text-sm leading-relaxed ${
           isUser
-            ? "bg-slate-900 text-white"
-            : "border border-slate-200 bg-white text-slate-700 shadow-sm"
+            ? "rounded-2xl rounded-br-xs bg-[#315F85] text-white shadow-xs"
+            : "rounded-2xl rounded-tl-xs border border-[#DCE4ED] bg-[#FFFFFF] text-[#172B4D] shadow-xs"
         }`}
       >
         {!isUser && activities && activities.length > 0 && (
@@ -45,7 +45,7 @@ export function Message({
             {isStreaming && (
               <span
                 aria-label="streaming"
-                className="inline-block ml-0.5 animate-pulse font-mono text-blue-600 motion-reduce:animate-none"
+                className="inline-block ml-0.5 animate-pulse font-mono text-[#315F85] motion-reduce:animate-none"
               >
                 ▋
               </span>
@@ -65,8 +65,8 @@ export function Message({
 
 export function LoadingState() {
   return (
-    <div aria-label="Assistant is thinking" className="flex items-center gap-2 text-xs text-slate-400">
-      <span className="size-2 animate-pulse rounded-full bg-blue-500 motion-reduce:animate-none" />
+    <div aria-label="Assistant is thinking" className="flex items-center gap-2 text-xs text-[#64748B]">
+      <span className="size-2 animate-pulse rounded-full bg-[#315F85] motion-reduce:animate-none" />
       <span>Thinking through that...</span>
     </div>
   );
@@ -76,7 +76,7 @@ type ErrorStateProps = { message?: string };
 
 export function ErrorState({ message = "Something went wrong. Please try again." }: ErrorStateProps) {
   return (
-    <div role="alert" className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+    <div role="alert" className="rounded-xl border border-[#C2413B]/20 bg-[#C2413B]/10 px-4 py-3 text-sm text-[#C2413B]">
       {message}
     </div>
   );

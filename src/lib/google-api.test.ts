@@ -109,4 +109,30 @@ describe("Google API broker", () => {
     const token = await issueGoogleCapability("user-1", "personal", ["gmail.search"]);
     await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.send", { to: "x", subject: "x", body: "x" })).rejects.toMatchObject({ code: "CONFIRMATION_REQUIRED" });
   });
+  it("builds docs.get using docs.googleapis.com, not www.googleapis.com", async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access-secret", expires_in: 3600 }), { status: 200 }));
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ documentId: "DOC1", title: "Test Doc", revisionId: "rev1" }), { status: 200 }));
+    await googleReadBroker.getDocument("user-1", "personal", "DOC1");
+    const apiCall = mocks.fetch.mock.calls.at(-1);
+    expect(String(apiCall[0])).toMatch(/^https:\/\/docs\.googleapis\.com\/v1\/documents\/DOC1/);
+    expect(String(apiCall[0])).not.toContain("www.googleapis.com");
+  });
+
+  it("builds docs.create using docs.googleapis.com, not www.googleapis.com", async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access-secret", expires_in: 3600 }), { status: 200 }));
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ documentId: "NEWDOC1", title: "My Doc" }), { status: 200 }));
+    await googleReadBroker.createDocument("user-1", "personal", "My Doc");
+    const apiCall = mocks.fetch.mock.calls.at(-1);
+    expect(String(apiCall[0])).toMatch(/^https:\/\/docs\.googleapis\.com\/v1\/documents$/);
+    expect(String(apiCall[0])).not.toContain("www.googleapis.com");
+  });
+
+  it("keeps docs.export using www.googleapis.com (Drive API, not Docs API)", async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access-secret", expires_in: 3600 }), { status: 200 }));
+    mocks.fetch.mockResolvedValueOnce(new Response("document plain text", { status: 200 }));
+    await googleReadBroker.exportDocument("user-1", "personal", "DOC1", "text/plain");
+    const apiCall = mocks.fetch.mock.calls.at(-1);
+    expect(String(apiCall[0])).toMatch(/^https:\/\/www\.googleapis\.com\/drive\/v3\/files\/DOC1\/export/);
+    expect(String(apiCall[0])).not.toContain("docs.googleapis.com");
+  });
 });

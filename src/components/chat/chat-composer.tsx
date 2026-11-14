@@ -1,7 +1,7 @@
 "use client";
 
-import { AccountSelector, type Account, type AccountItem } from "@/components/chat/account-selector";
-import { Icon } from "@/components/ui/icons";
+import { AccountSelector, type Account, type AccountItem } from "./account-selector";
+import { Icon } from "../ui/icons";
 
 type ChatComposerProps = {
   value: string;
@@ -31,7 +31,7 @@ export function ChatComposer({
   return (
     <div className="mx-auto w-full max-w-4xl">
       <form
-        className="rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_10px_35px_rgb(15_23_42_/_0.07)] transition focus-within:border-blue-300 focus-within:ring-4 focus-within:ring-blue-50"
+        className="rounded-2xl border border-[#DCE4ED] bg-[#FFFFFF] p-2.5 shadow-sm transition focus-within:border-[#315F85] focus-within:ring-2 focus-within:ring-[#315F85]/20"
         onSubmit={(event) => {
           event.preventDefault();
           if (canSubmit && !isLoading) onSubmit();
@@ -39,24 +39,26 @@ export function ChatComposer({
       >
         <label className="sr-only" htmlFor="message">Message your assistant</label>
         <textarea
-          className="min-h-20 w-full resize-none bg-transparent px-3 py-2 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400"
+          className="min-h-20 w-full resize-none bg-transparent px-3 py-2 text-sm leading-relaxed text-[#172B4D] outline-none placeholder:text-[#64748B]"
+          disabled={isLoading}
           id="message"
+          onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               if (canSubmit && !isLoading) onSubmit();
             }
           }}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder="Ask anything, or choose a suggestion above..."
+          placeholder="Message your assistant..."
           rows={2}
-          disabled={isLoading}
           value={value}
         />
-        <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1 pt-1 border-t border-[#DCE4ED]/40">
           <div className="flex items-center gap-3">
-            <p className="hidden text-[11px] text-slate-400 sm:block">Enter to send · Shift + Enter for a new line</p>
-            <div className="w-[150px] [&_label]:sr-only [&_select]:h-8 [&_select]:rounded-lg [&_select]:bg-slate-50 [&_select]:py-1.5 [&_select]:text-[11px]">
+            <p className="hidden text-[11px] text-[#64748B] sm:block">
+              Enter to send · Shift + Enter for a new line
+            </p>
+            <div className="w-[160px] [&_label]:sr-only [&_select]:h-8 [&_select]:rounded-lg [&_select]:bg-[#F1F5F9] [&_select]:border-[#DCE4ED] [&_select]:py-1.5 [&_select]:text-[11px] [&_select]:text-[#172B4D]">
               <AccountSelector
                 accounts={accounts}
                 disabled={isLoading || isAccountsLoading}
@@ -69,19 +71,19 @@ export function ChatComposer({
           {isLoading ? (
             <button
               aria-label="Stop generating response"
-              className="flex size-9 items-center justify-center rounded-xl bg-slate-800 text-white transition hover:bg-slate-700 shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-500"
+              className="flex size-9 items-center justify-center rounded-xl bg-[#172B4D] text-white transition hover:bg-[#243B53] shadow-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-[#172B4D]"
               onClick={(e) => {
                 e.preventDefault();
                 onStop?.();
               }}
               type="button"
             >
-              <span className="size-3 rounded-sm bg-white" />
+              <span className="size-3 rounded-xs bg-white" />
             </button>
           ) : (
             <button
               aria-label="Send message"
-              className="flex size-9 items-center justify-center rounded-xl bg-[#1d5bd7] text-white transition hover:bg-[#1749af] disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+              className="flex size-9 items-center justify-center rounded-xl bg-[#315F85] text-white transition hover:bg-[#264D70] disabled:cursor-not-allowed disabled:bg-[#DCE4ED] disabled:text-[#64748B] shadow-xs"
               disabled={!canSubmit}
               type="submit"
             >
@@ -90,7 +92,9 @@ export function ChatComposer({
           )}
         </div>
       </form>
-      <p className="mt-3 text-center text-[11px] text-slate-400">AI Personal Assistant can make mistakes. Check important information.</p>
+      <p className="mt-2.5 text-center text-[11px] text-[#64748B]">
+        AI Personal Assistant can make mistakes. Verify important information.
+      </p>
     </div>
   );
 }

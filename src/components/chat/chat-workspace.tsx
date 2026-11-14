@@ -19,9 +19,14 @@ import { EmptyState } from "@/components/chat/empty-state";
 import { ErrorState, LoadingState, Message } from "@/components/chat/message";
 import { ChatHeader } from "@/components/layout/chat-header";
 import { Sidebar } from "@/components/layout/sidebar";
+import { RightAccountPanel } from "@/components/layout/right-account-panel";
+import { AboutModal } from "@/components/layout/about-modal";
 import { AccountManager } from "@/components/accounts/account-manager";
 import { fetchAccounts, type GoogleAccount } from "@/components/accounts/account-api";
 import type { User } from "@/lib/db/schema";
+
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "assistant_sidebar_collapsed";
+const RIGHT_PANEL_OPEN_STORAGE_KEY = "assistant_right_panel_open";
 
 export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "email" | "picture"> }) {
   const [account, setAccount] = useState<AccountType>("personal");
@@ -39,6 +44,8 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
   const [isAccountsLoading, setIsAccountsLoading] = useState(true);
   const [accountsError, setAccountsError] = useState<string | null>(null);
   const [isAccountManagerOpen, setIsAccountManagerOpen] = useState(false);
+  const [isRightAccountPanelOpen, setIsRightAccountPanelOpen] = useState(false);
+  const [isAboutModalOpen, setIsAboutModalOpen] = useState(false);
   const [oauthNotice, setOauthNotice] = useState<{ type: "success" | "error"; message: string } | null>(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
@@ -113,6 +120,8 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
     };
   }, []);
 
+
+
   // Smart auto-scrolling
   const handleScroll = () => {
     const el = scrollContainerRef.current;
@@ -155,6 +164,29 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Restore desktop layout preferences from localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (window.innerWidth >= 1024) {
+        const savedCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+        const savedRightOpen = localStorage.getItem(RIGHT_PANEL_OPEN_STORAGE_KEY);
+        if (savedCollapsed !== null || savedRightOpen !== null) {
+          queueMicrotask(() => {
+            if (savedCollapsed !== null) {
+              setIsSidebarCollapsed(savedCollapsed === "true");
+            }
+            if (savedRightOpen !== null) {
+              setIsRightAccountPanelOpen(savedRightOpen === "true");
+            }
+          });
+        }
+      }
+    } catch {
+      // Ignore storage errors
+    }
   }, []);
 
   const handleNewChat = () => {
@@ -328,8 +360,60 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
     }
   };
 
+  const handleToggleSidebarCollapse = () => {
+    setIsSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        if (typeof window !== "undefined") {
+          localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(next));
+        }
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  const handleToggleRightAccountPanel = () => {
+    setIsRightAccountPanelOpen((prev) => {
+      const next = !prev;
+      try {
+        if (typeof window !== "undefined") {
+          localStorage.setItem(RIGHT_PANEL_OPEN_STORAGE_KEY, String(next));
+        }
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  const handleOpenRightAccountPanel = () => {
+    setIsRightAccountPanelOpen(true);
+    try {
+      if (typeof window !== "undefined") {
+        localStorage.setItem(RIGHT_PANEL_OPEN_STORAGE_KEY, "true");
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  };
+
+  const handleCloseRightAccountPanel = () => {
+    setIsRightAccountPanelOpen(false);
+    try {
+      if (typeof window !== "undefined") {
+        localStorage.setItem(RIGHT_PANEL_OPEN_STORAGE_KEY, "false");
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  };
+
+  const activeConversation = conversations.find((c) => c.id === activeConversationId);
+
   return (
-    <div className="flex min-h-screen bg-[var(--background)] lg:h-dvh lg:min-h-0 lg:overflow-hidden">
+    <div className="flex h-screen w-full bg-[#F4F7FB] overflow-hidden">
       <Sidebar
         account={account}
         accounts={accounts}
@@ -342,79 +426,106 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
         onClose={() => setIsSidebarOpen(false)}
         onDeleteConversation={handleDeleteConversation}
         onNewChat={handleNewChat}
+        onOpenAbout={() => setIsAboutModalOpen(true)}
+        onOpenAccounts={handleOpenRightAccountPanel}
         onOpenSettings={() => setIsAccountManagerOpen(true)}
         onRenameConversation={handleRenameConversation}
         onSelectConversation={handleSelectConversation}
-        onToggleCollapse={() => setIsSidebarCollapsed((collapsed) => !collapsed)}
+        onToggleCollapse={handleToggleSidebarCollapse}
         user={user}
       />
-      <main className="flex min-h-screen min-w-0 flex-1 flex-col lg:h-full lg:min-h-0">
+      <div className="flex flex-1 flex-col min-w-0 h-full overflow-hidden">
         <ChatHeader
+          isAccountPanelOpen={isRightAccountPanelOpen}
           isSidebarCollapsed={isSidebarCollapsed}
+          isSidebarOpen={isSidebarOpen}
           onMenuClick={() => {
-            if (window.innerWidth >= 1024) setIsSidebarCollapsed((collapsed) => !collapsed);
-            else setIsSidebarOpen(true);
+            if (typeof window !== "undefined" && window.innerWidth >= 1024) {
+              handleToggleSidebarCollapse();
+            } else {
+              setIsSidebarOpen((open) => !open);
+            }
           }}
+          onOpenManageAccounts={() => setIsAccountManagerOpen(true)}
+          onToggleAccountPanel={handleToggleRightAccountPanel}
+          subtitle="Enterprise Google Workspace Assistant"
+          title={activeConversation ? activeConversation.title : "New conversation"}
+          user={user}
         />
-        <div className="flex min-h-0 flex-1 flex-col px-5 sm:px-8">
-          {oauthNotice && (
-            <div className="mt-3 flex items-center justify-between rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">
-              <span>{oauthNotice.message}</span>
-              <button
-                className="font-medium text-red-700 hover:text-red-900"
-                onClick={() => setOauthNotice(null)}
-                type="button"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
-          {chatState.messages.length === 0 ? (
-            <EmptyState onPromptSelect={(prompt) => dispatch({ type: "composer-changed", value: prompt })} />
-          ) : (
-            <div
-              aria-live="polite"
-              className="min-h-0 flex-1 overflow-y-auto py-8 sm:py-10"
-              onScroll={handleScroll}
-              ref={scrollContainerRef}
-            >
-              <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
-                {chatState.messages.map((message) => (
-                  <Message
-                    activities={message.activities}
-                    content={message.content}
-                    isStreaming={message.isStreaming}
-                    key={message.id}
-                    onConfirmApproval={handleConfirmApproval}
-                    pendingApproval={message.pendingApproval}
-                    role={message.role}
-                  />
-                ))}
-                {chatState.isLoading && !chatState.messages.some((m) => m.role === "assistant" && m.isStreaming) && (
-                  <LoadingState />
-                )}
-                {chatState.error && <ErrorState message={chatState.error} />}
-                <div ref={messagesEndRef} />
+        <div className="flex flex-1 min-h-0 overflow-hidden">
+          <main className="flex flex-1 min-w-0 flex-col h-full overflow-hidden">
+            <div className="flex min-h-0 flex-1 flex-col px-4 sm:px-6">
+              {oauthNotice && (
+                <div className="mt-3 flex items-center justify-between rounded-xl border border-[#C2413B]/20 bg-[#C2413B]/10 p-3 text-xs text-[#C2413B]">
+                  <span>{oauthNotice.message}</span>
+                  <button
+                    className="font-semibold text-[#C2413B] hover:underline"
+                    onClick={() => setOauthNotice(null)}
+                    type="button"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+              {chatState.messages.length === 0 ? (
+                <EmptyState onPromptSelect={(prompt) => dispatch({ type: "composer-changed", value: prompt })} />
+              ) : (
+                <div
+                  aria-live="polite"
+                  className="min-h-0 flex-1 overflow-y-auto py-6 sm:py-8"
+                  onScroll={handleScroll}
+                  ref={scrollContainerRef}
+                >
+                  <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+                    {chatState.messages.map((message) => (
+                      <Message
+                        activities={message.activities}
+                        content={message.content}
+                        isStreaming={message.isStreaming}
+                        key={message.id}
+                        onConfirmApproval={handleConfirmApproval}
+                        pendingApproval={message.pendingApproval}
+                        role={message.role}
+                      />
+                    ))}
+                    {chatState.isLoading && !chatState.messages.some((m) => m.role === "assistant" && m.isStreaming) && (
+                      <LoadingState />
+                    )}
+                    {chatState.error && <ErrorState message={chatState.error} />}
+                    <div ref={messagesEndRef} />
+                  </div>
+                </div>
+              )}
+              {isHistoryLoading && <p className="pb-2 text-center text-xs text-[#64748B]">Loading conversation history...</p>}
+              {historyError && <ErrorState message={historyError} />}
+              <div className="pb-4 sm:pb-6">
+                <ChatComposer
+                  account={account}
+                  accounts={accounts}
+                  isAccountsLoading={isAccountsLoading}
+                  isLoading={chatState.isLoading}
+                  onAccountChange={setAccount}
+                  onChange={(value) => dispatch({ type: "composer-changed", value })}
+                  onStop={handleStopGeneration}
+                  onSubmit={handleSubmit}
+                  value={chatState.composerValue}
+                />
               </div>
             </div>
-          )}
-          {isHistoryLoading && <p className="pb-2 text-center text-xs text-slate-400">Loading conversation history...</p>}
-          {historyError && <ErrorState message={historyError} />}
-          <div className="pb-5 sm:pb-7">
-            <ChatComposer
-              account={account}
-              accounts={accounts}
-              isAccountsLoading={isAccountsLoading}
-              isLoading={chatState.isLoading}
-              onAccountChange={setAccount}
-              onChange={(value) => dispatch({ type: "composer-changed", value })}
-              onStop={handleStopGeneration}
-              onSubmit={handleSubmit}
-              value={chatState.composerValue}
-            />
-          </div>
+          </main>
+          <RightAccountPanel
+            accounts={accounts}
+            activeAccountLabel={account}
+            isLoading={isAccountsLoading}
+            isOpen={isRightAccountPanelOpen}
+            onClose={handleCloseRightAccountPanel}
+            onOpenManageAccounts={() => {
+              handleCloseRightAccountPanel();
+              setIsAccountManagerOpen(true);
+            }}
+          />
         </div>
-      </main>
+      </div>
 
       {/* Account Management Modal */}
       <AccountManager
@@ -426,6 +537,12 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
         onAccountRenamed={handleAccountRenamed}
         onClose={() => setIsAccountManagerOpen(false)}
         onRefresh={handleRefreshAccounts}
+      />
+
+      {/* About Modal */}
+      <AboutModal
+        isOpen={isAboutModalOpen}
+        onClose={() => setIsAboutModalOpen(false)}
       />
     </div>
   );

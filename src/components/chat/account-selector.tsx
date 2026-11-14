@@ -94,7 +94,7 @@ export function AccountSelector({
   return (
     <div className="relative">
       <label
-        className="mb-2 block text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400"
+        className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.16em] text-[#64748B]"
         htmlFor="account"
       >
         Gmail account
@@ -102,7 +102,7 @@ export function AccountSelector({
       <div className="relative">
         <select
           aria-label="Choose Gmail account"
-          className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-9 text-sm font-medium text-slate-700 outline-none transition disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+          className="w-full appearance-none rounded-xl border border-[#DCE4ED] bg-[#FFFFFF] px-3 py-2 pr-8 text-xs font-medium text-[#172B4D] outline-none transition disabled:cursor-not-allowed disabled:bg-[#F1F5F9] disabled:text-[#64748B] focus:border-[#315F85] focus:ring-2 focus:ring-[#315F85]/20"
           disabled={disabled || isLoading}
           id="account"
           onChange={(event) => onChange(event.target.value)}
