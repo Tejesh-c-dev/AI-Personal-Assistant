@@ -97,7 +97,7 @@ export function extractPendingApproval(response: unknown): PendingApprovalPrevie
       account,
       operation: "calendar.create",
       expiresAt,
-      details: { summary, start, end, calendarId },
+      details: { summary, date: typeof ev.date === "string" ? ev.date : start.slice(0, 10), start, end, timezone: String(ev.timezone ?? ""), durationMinutes: String(ev.durationMinutes ?? ""), durationSource: String(ev.durationSource ?? ""), calendarId },
     };
   }
 
@@ -120,7 +120,7 @@ export function extractPendingApproval(response: unknown): PendingApprovalPrevie
   if (rec.proposedInsertion && typeof rec.proposedInsertion === "object") {
     const ins = rec.proposedInsertion as Record<string, unknown>;
     const account = typeof ins.account === "string" ? ins.account : "personal";
-    const documentId = typeof ins.documentId === "string" ? ins.documentId : "";
+    const documentName = typeof ins.documentName === "string" ? ins.documentName : "Google document";
     const textPreview = typeof ins.textPreview === "string" ? ins.textPreview : "";
 
     return {
@@ -128,10 +128,9 @@ export function extractPendingApproval(response: unknown): PendingApprovalPrevie
       account,
       operation: "docs.insert",
       expiresAt,
-      details: { documentId, textPreview },
+      details: { documentName, textPreview },
     };
   }
 
   return null;
 }
-

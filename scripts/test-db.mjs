@@ -71,17 +71,17 @@ try {
   )).rowCount > 0;
   if (drizzleSchemaExists) {
     const drizzleCount = (await client.query("select count(*) as c from drizzle.__drizzle_migrations")).rows[0].c;
-    if (Number(drizzleCount) >= 9) {
+    if (Number(drizzleCount) >= 10) {
       // All 9 migrations (0000-0008) are recorded in drizzle journal; mark them applied in our tracker.
       const files = await readdir(resolve("drizzle"));
-      for (let n = 0; n <= 8; n++) {
+      for (let n = 0; n <= 9; n++) {
         const prefixNumber = String(n).padStart(4, "0");
         const migration = files.find((f) => f.startsWith(`${prefixNumber}_`) && f.endsWith(".sql"));
         if (migration) await client.query("insert into public._ai_personal_assistant_test_migrations(name) values($1) on conflict do nothing", [migration]);
       }
     }
   }
-  for (let n = 0; n <= 8; n++) {
+  for (let n = 0; n <= 9; n++) {
     const prefixNumber = String(n).padStart(4, "0");
     const migration = (await readdir(resolve("drizzle"))).find((file) => file.startsWith(`${prefixNumber}_`) && file.endsWith(".sql"));
     if (!migration) throw new Error(`Migration ${prefixNumber} is missing.`);
@@ -257,6 +257,19 @@ try {
     throw new Error("ON UPDATE CASCADE did not propagate label rename to google_write_approvals");
   }
   executed.push("ON UPDATE CASCADE label rename propagated to approvals: verified");
+
+  const raceClient = new Client({ connectionString: raw });
+  await raceClient.connect();
+  try {
+    const [confirmRace, rejectRace] = await Promise.all([
+      client.query("update google_write_approvals set status='confirming', consumed_at=now() where id=$1 and status='pending' and consumed_at is null and expires_at>now() returning id", [dynApprovalId]),
+      raceClient.query("update google_write_approvals set status='rejected', consumed_at=now() where id=$1 and status='pending' and consumed_at is null and expires_at>now() returning id", [dynApprovalId]),
+    ]);
+    if (confirmRace.rowCount + rejectRace.rowCount !== 1) throw new Error("Concurrent confirmation and rejection did not produce exactly one winner.");
+    executed.push("concurrent confirmation/rejection: exactly one atomic transition won");
+  } finally {
+    await raceClient.end();
+  }
   // ── end 0008 ─────────────────────────────────────────────────────────────
 
   console.log(`Cases: ${executed.length}`); for (const line of executed) console.log(`- ${line}`);

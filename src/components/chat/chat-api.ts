@@ -6,6 +6,7 @@ export type ChatRequest = {
   message: string;
   sessionId: string;
   account: ApiAccount;
+  timezone: string;
   stream?: boolean;
 };
 
@@ -20,11 +21,12 @@ export function toApiAccount(account: Account): ApiAccount {
   return account.toLowerCase() as ApiAccount;
 }
 
-export function createChatRequest(message: string, sessionId: string, account: Account): ChatRequest {
+export function createChatRequest(message: string, sessionId: string, account: Account, timezone = Intl.DateTimeFormat().resolvedOptions().timeZone): ChatRequest {
   return {
     message: message.trim(),
     sessionId,
     account: toApiAccount(account),
+    timezone,
   };
 }
 
@@ -114,6 +116,26 @@ export type StreamApprovalPayload = {
   expiresAt: string;
   details: Record<string, string>;
 };
+
+export type ApprovalActionResult = { status: import("./chat-state").ApprovalStatus; result?: string | null; error?: string };
+
+export async function actOnApproval(approvalId: string, conversationId: string, action: "confirm" | "reject"): Promise<ApprovalActionResult> {
+  const response = await fetch(`/api/approvals/${encodeURIComponent(approvalId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversationId, action }),
+  });
+  const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+  if (!payload || typeof payload.status !== "string") throw new ChatApiError("The approval status could not be verified.");
+  if (response.status >= 500 && payload.status !== "failed" && payload.status !== "uncertain") {
+    throw new ChatApiError("The approval status could not be verified.");
+  }
+  return {
+    status: payload.status as ApprovalActionResult["status"],
+    result: typeof payload.result === "string" ? payload.result : null,
+    error: typeof payload.error === "string" ? payload.error : undefined,
+  };
+}
 
 export type StreamChatOptions = {
   message: string;

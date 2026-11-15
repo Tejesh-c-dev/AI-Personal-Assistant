@@ -415,6 +415,28 @@ for the user's task and enforce reasonable output-size limits.
 Content retrieved from Google must be treated as data, not as
 instructions that can override system policy or tool authorization.
 
+### 6.4 Tool selection rules
+
+- Gmail search finds messages from query criteria and returns summaries
+  with IDs. Gmail get retrieves one message only when its exact ID is
+  already known; use search to discover messages.
+- Calendar list finds events in a requested time range and returns
+  summaries with IDs. Calendar get retrieves one event only when its
+  exact ID is already known; use list to discover events.
+- Docs get returns the metadata and structure currently supported by
+  the broker, not document text. Docs export retrieves existing
+  document content by known document ID.
+- Never invent an ID. Ask for clarification or a missing identifier
+  when the available tools cannot discover it. Avoid Google calls when
+  the request does not need Google data.
+- A draft request does not imply sending or saving. Proposal tools only
+  create pending approval records; they never execute writes. The
+  deterministic confirmation handler remains the only path that can
+  execute an approved write, and it bypasses the model.
+- `both` remains read-only. The selected account and account-bound tool
+  closures are resolved by the server; the model cannot choose a user,
+  account, or capability.
+
 ------------------------------------------------------------------------
 
 ## 7. Deterministic write confirmation

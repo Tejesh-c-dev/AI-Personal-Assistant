@@ -1,6 +1,7 @@
 import { Icon } from "../ui/icons";
 import { ActivityTimeline } from "./activity-timeline";
 import { ApprovalCard } from "./approval-card";
+import type { ApprovalActionResult } from "./chat-api";
 import type { ApprovalPreviewData, ToolActivity } from "./chat-state";
 
 type MessageProps = {
@@ -9,7 +10,8 @@ type MessageProps = {
   activities?: ToolActivity[];
   pendingApproval?: ApprovalPreviewData;
   isStreaming?: boolean;
-  onConfirmApproval?: (approvalId: string) => void;
+  onConfirmApproval?: (approvalId: string) => Promise<ApprovalActionResult>;
+  onRejectApproval?: (approvalId: string) => Promise<ApprovalActionResult>;
 };
 
 export function Message({
@@ -19,6 +21,7 @@ export function Message({
   pendingApproval,
   isStreaming = false,
   onConfirmApproval,
+  onRejectApproval,
 }: MessageProps) {
   const isUser = role === "user";
 
@@ -56,6 +59,7 @@ export function Message({
           <ApprovalCard
             approval={pendingApproval}
             onConfirm={onConfirmApproval}
+            onReject={onRejectApproval}
           />
         )}
       </div>

@@ -1,4 +1,5 @@
 import type { Account } from "./account-selector";
+import type { ApprovalPreviewData } from "./chat-state";
 
 export type ApiAccount = string;
 
@@ -46,6 +47,10 @@ export async function listConversations() {
 
 export async function getConversation(id: string) {
   return requestJson<ConversationDetail>(`/api/conversations/${id}`);
+}
+
+export async function getConversationApprovals(id: string) {
+  return requestJson<{ approvals: ApprovalPreviewData[] }>(`/api/conversations/${id}/approvals`);
 }
 
 export async function createConversation(input: {

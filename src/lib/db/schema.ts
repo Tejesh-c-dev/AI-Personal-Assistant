@@ -141,11 +141,14 @@ export const googleWriteApprovals = pgTable("google_write_approvals", {
   accountLabel: text("account_label").notNull(),
   googleAccountId: uuid("google_account_id").notNull(),
   operation: text("operation").notNull(),
-  payload: text("payload").notNull(),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  consumedAt: timestamp("consumed_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-}, (table) => [index("google_write_approvals_user_conversation_idx").on(table.userId, table.conversationId), foreignKey({ columns: [table.userId, table.conversationId], foreignColumns: [conversations.userId, conversations.id], name: "google_write_approvals_conversation_owner_fk" }).onDelete("cascade"), foreignKey({ columns: [table.userId, table.googleAccountId, table.accountLabel], foreignColumns: [googleAccounts.userId, googleAccounts.id, googleAccounts.label], name: "google_write_approvals_account_owner_label_fk" }).onDelete("cascade").onUpdate("cascade"), check("google_write_approvals_label_check", sql`length(${table.accountLabel}) between 1 and 50`)]);
+    payload: text("payload").notNull(),
+    displayDetails: text("display_details").notNull().default("{}"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    status: text("status").notNull().default("pending"),
+    result: text("result"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  }, (table) => [index("google_write_approvals_user_conversation_idx").on(table.userId, table.conversationId), foreignKey({ columns: [table.userId, table.conversationId], foreignColumns: [conversations.userId, conversations.id], name: "google_write_approvals_conversation_owner_fk" }).onDelete("cascade"), foreignKey({ columns: [table.userId, table.googleAccountId, table.accountLabel], foreignColumns: [googleAccounts.userId, googleAccounts.id, googleAccounts.label], name: "google_write_approvals_account_owner_label_fk" }).onDelete("cascade").onUpdate("cascade"), check("google_write_approvals_label_check", sql`length(${table.accountLabel}) between 1 and 50`), check("google_write_approvals_status_check", sql`${table.status} in ('pending', 'confirming', 'approved', 'rejected', 'failed', 'uncertain')`)]);
 
 export const messages = pgTable(
   "messages",

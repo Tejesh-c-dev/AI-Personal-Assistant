@@ -159,4 +159,13 @@ describe("chat state", () => {
       ]);
     });
   });
+
+  it("updates approval state from the backend response", () => {
+    const state = {
+      ...initialChatState,
+      messages: [{ id: "m1", role: "assistant" as const, content: "", pendingApproval: { approvalId: "approval-1", account: "work", operation: "docs.create" as const, expiresAt: "later", details: { title: "Notes" }, status: "pending" as const } }],
+    };
+    const updated = chatReducer(state, { type: "approval-updated", approvalId: "approval-1", status: "approved", result: "Document created." });
+    expect(updated.messages[0].pendingApproval).toMatchObject({ status: "approved", result: "Document created." });
+  });
 });

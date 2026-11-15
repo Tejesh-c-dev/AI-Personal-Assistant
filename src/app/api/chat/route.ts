@@ -50,6 +50,7 @@ import {
   extractPendingApproval,
   mapToolToActivityLabel,
 } from "../../../lib/adk/activity-mapper";
+import { createTrustedTimeContext, isValidIanaTimezone } from "../../../lib/trusted-time";
 
 const DEFAULT_TIMEOUT_MS = 150_000;
 export const maxDuration = 180;
@@ -77,6 +78,7 @@ type ChatRequest = {
   message: string;
   sessionId: string;
   account: string;
+  timezone: string;
   stream?: boolean;
 };
 
@@ -106,6 +108,7 @@ function isChatRequest(value: unknown): value is ChatRequest {
     isUuid(request.sessionId.trim()) &&
     typeof request.account === "string" &&
     isAccount(request.account) &&
+    isValidIanaTimezone(request.timezone) &&
     (request.stream === undefined || typeof request.stream === "boolean")
   );
 }
@@ -158,7 +161,7 @@ async function handlePost(request: Request, requestId: string) {
   }
 
   if (!isChatRequest(body)) {
-    return errorResponse("Invalid chat request.", 400);
+    return errorResponse("Invalid chat request. A valid IANA timezone is required.", 400);
   }
   if (body.account !== "both") {
     try {
@@ -171,6 +174,7 @@ async function handlePost(request: Request, requestId: string) {
   const isStreamingRequested =
     request.headers.get("accept")?.includes("text/event-stream") ||
     body.stream === true;
+  const trustedTime = createTrustedTimeContext(body.timezone);
 
   let conversation;
   try {
@@ -206,7 +210,7 @@ async function handlePost(request: Request, requestId: string) {
   }
 
   // --- Google ADK Path ---
-  if (process.env.USE_ADK === "true") {
+  if (process.env.USE_ADK === "true" || parseConfirmationCommand(body.message)) {
     // 1. Check for explicit confirmation command before invoking LLM
     const confirmationId = parseConfirmationCommand(body.message);
     if (confirmationId) {
@@ -450,6 +454,7 @@ async function handlePost(request: Request, requestId: string) {
         conversation,
         selectedAccount: body.account,
         connectedLabels,
+        trustedTime,
       }));
     } catch {
       logRequestFailure(requestId, "runner_initialization");

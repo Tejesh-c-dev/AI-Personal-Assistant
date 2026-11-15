@@ -2,7 +2,7 @@
 
 import { useEffect, useReducer, useRef, useState } from "react";
 
-import { streamChatMessage } from "@/components/chat/chat-api";
+import { actOnApproval, streamChatMessage } from "@/components/chat/chat-api";
 import { type Account as AccountType } from "@/components/chat/account-selector";
 import { ChatComposer } from "@/components/chat/chat-composer";
 import { chatReducer, initialChatState } from "@/components/chat/chat-state";
@@ -10,6 +10,7 @@ import { createSessionId } from "@/components/chat/chat-session";
 import {
   createConversation,
   getConversation,
+  getConversationApprovals,
   listConversations,
   removeConversation,
   updateConversation,
@@ -144,14 +145,20 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
         setConversations(loadedConversations);
         if (!loadedActiveId) return;
 
-        const detail = await getConversation(loadedActiveId);
+        const [detail, approvalData] = await Promise.all([
+          getConversation(loadedActiveId),
+          getConversationApprovals(loadedActiveId).catch(() => ({ approvals: [] })),
+        ]);
         if (cancelled) return;
         setActiveConversationId(detail.conversation.id);
         setSessionId(detail.conversation.sessionId);
         setAccount(toUiAccount(detail.conversation.account));
         dispatch({
           type: "load-messages",
-          messages: detail.messages.map(({ id, role, content }) => ({ id, role, content })),
+          messages: [
+            ...detail.messages.map(({ id, role, content }) => ({ id, role, content })),
+            ...approvalData.approvals.map((approval) => ({ id: `approval-${approval.approvalId}`, role: "assistant" as const, content: "", pendingApproval: approval })),
+          ],
         });
       })
       .catch((error: unknown) => {
@@ -296,8 +303,11 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
     dispatch({ type: "stream-abort" });
   };
 
-  const handleConfirmApproval = (approvalId: string) => {
-    void submitMessage(`CONFIRM ${approvalId}`);
+  const handleApprovalAction = async (approvalId: string, action: "confirm" | "reject") => {
+    if (!activeConversationId) throw new Error("This approval is no longer available.");
+    const result = await actOnApproval(approvalId, activeConversationId, action);
+    dispatch({ type: "approval-updated", approvalId, status: result.status, result: result.result });
+    return result;
   };
 
   const handleAccountChange = (nextAccount: AccountType) => {
@@ -319,10 +329,16 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
     setSessionId(conversation.sessionId);
     setAccount(toUiAccount(conversation.account));
     setIsSidebarOpen(false);
-    void getConversation(conversation.id)
-      .then((detail) => dispatch({
+    void Promise.all([
+      getConversation(conversation.id),
+      getConversationApprovals(conversation.id).catch(() => ({ approvals: [] })),
+    ])
+      .then(([detail, approvalData]) => dispatch({
         type: "load-messages",
-        messages: detail.messages.map(({ id, role, content }) => ({ id, role, content })),
+        messages: [
+          ...detail.messages.map(({ id, role, content }) => ({ id, role, content })),
+          ...approvalData.approvals.map((approval) => ({ id: `approval-${approval.approvalId}`, role: "assistant" as const, content: "", pendingApproval: approval })),
+        ],
       }))
       .catch((error: unknown) => setHistoryError(error instanceof Error ? error.message : "Conversation could not be loaded."));
   };
@@ -483,7 +499,8 @@ export default function ChatWorkspace({ user }: { user: Pick<User, "name" | "ema
                         content={message.content}
                         isStreaming={message.isStreaming}
                         key={message.id}
-                        onConfirmApproval={handleConfirmApproval}
+                        onConfirmApproval={(approvalId) => handleApprovalAction(approvalId, "confirm")}
+                        onRejectApproval={(approvalId) => handleApprovalAction(approvalId, "reject")}
                         pendingApproval={message.pendingApproval}
                         role={message.role}
                       />

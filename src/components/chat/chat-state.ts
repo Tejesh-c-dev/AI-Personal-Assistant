@@ -4,12 +4,16 @@ export type ToolActivity = {
   status: "running" | "completed" | "failed" | "cancelled";
 };
 
+export type ApprovalStatus = "pending" | "confirming" | "approved" | "rejected" | "expired" | "failed" | "uncertain" | "unavailable";
+
 export type ApprovalPreviewData = {
   approvalId: string;
   account: string;
   operation: "gmail.send" | "calendar.create" | "docs.create" | "docs.insert";
   expiresAt: string;
   details: Record<string, string>;
+  status?: ApprovalStatus;
+  result?: string | null;
 };
 
 export type ChatMessage = {
@@ -38,6 +42,7 @@ export type ChatAction =
   | { type: "stream-start"; messageId: string }
   | { type: "stream-activity"; activity: ToolActivity }
   | { type: "stream-approval"; approval: ApprovalPreviewData }
+  | { type: "approval-updated"; approvalId: string; status: ApprovalStatus; result?: string | null }
   | { type: "stream-delta"; text: string }
   | { type: "stream-final"; messageId?: string }
   | { type: "stream-abort" }
@@ -152,6 +157,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         messages: [...state.messages.slice(0, -1), updatedLast],
       };
     }
+
+    case "approval-updated":
+      return {
+        ...state,
+        messages: state.messages.map((message) => message.pendingApproval?.approvalId === action.approvalId
+          ? { ...message, pendingApproval: { ...message.pendingApproval, status: action.status, result: action.result } }
+          : message),
+      };
 
     case "stream-delta": {
       const last = state.messages[state.messages.length - 1];

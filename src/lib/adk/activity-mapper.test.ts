@@ -108,9 +108,13 @@ describe("activity-mapper", () => {
       expiresAt: "2026-11-15T00:00:00Z",
       details: {
         calendarId: "primary",
+        date: "2026-11-15",
+        durationMinutes: "",
+        durationSource: "",
         summary: "Sprint Sync",
         start: "2026-11-15T10:00:00Z",
         end: "2026-11-15T11:00:00Z",
+        timezone: "",
       },
     });
 
@@ -132,14 +136,14 @@ describe("activity-mapper", () => {
       approvalId: "app-ins",
       expiresAt: "2026-11-15T00:00:00Z",
       status: "pending_confirmation",
-      proposedInsertion: { account: "personal", documentId: "doc-99", textPreview: "Hello" },
+      proposedInsertion: { account: "personal", documentName: "Project notes", textPreview: "Hello" },
     };
     expect(extractPendingApproval(insertRaw)).toEqual({
       approvalId: "app-ins",
       account: "personal",
       operation: "docs.insert",
       expiresAt: "2026-11-15T00:00:00Z",
-      details: { documentId: "doc-99", textPreview: "Hello" },
+      details: { documentName: "Project notes", textPreview: "Hello" },
     });
   });
 
@@ -150,4 +154,3 @@ describe("activity-mapper", () => {
     expect(extractPendingApproval({ approvalId: "123", status: "rejected" })).toBeNull();
   });
 });
-

@@ -6,7 +6,15 @@ vi.mock("./auth", () => ({ findGoogleAccount: mocks.findGoogleAccount, markGoogl
 vi.mock("./google-token-crypto", () => ({ decryptGoogleRefreshToken: mocks.decrypt }));
 vi.mock("./db", () => ({ getDatabase: () => ({ insert: () => ({ values: mocks.insertValues }), update: () => ({ set: () => ({ where: () => ({ returning: mocks.returning }) }) }) }) }));
 
-import { GoogleAuthorizationError, googleReadBroker, issueGoogleCapability, issueGoogleProposalCapability, verifyGoogleCapability, verifyGoogleProposalCapability } from "./google-api";
+import { GoogleAuthorizationError, googleBroker, googleReadBroker, issueGoogleCapability, issueGoogleProposalCapability, verifyGoogleCapability, verifyGoogleProposalCapability } from "./google-api";
+
+const lastFetchCall = () => {
+  const apiCall = mocks.fetch.mock.calls.at(-1);
+  if (apiCall === undefined) {
+    throw new Error("Expected fetch to have been called");
+  }
+  return apiCall;
+};
 
 const scopes = ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/documents", "https://www.googleapis.com/auth/drive.readonly"];
 const account = (overrides: Record<string, unknown> = {}) => ({ id: "account-1", userId: "user-1", identityId: "identity-1", accountType: "personal", refreshTokenCiphertext: "ciphertext", grantedScopes: scopes, status: "active", updatedAt: new Date("2026-01-01T00:00:00.000Z"), ...overrides });
@@ -55,7 +63,7 @@ describe("Google API broker", () => {
     mocks.findGoogleAccount.mockResolvedValue(account({ id: "replacement-account" }));
     await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.search")).rejects.toMatchObject({ code: "RECONNECT_REQUIRED" });
     mocks.findGoogleAccount.mockResolvedValue(account());
-    await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.search")).resolves.toBeUndefined();
+    await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.search")).resolves.toEqual({ accountId: "account-1" });
     mocks.returning.mockResolvedValueOnce([]);
     await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.search")).rejects.toMatchObject({ code: "INVALID_REQUEST" });
     await expect(verifyGoogleCapability(token, "user-2", "personal", "gmail.search")).rejects.toMatchObject({ code: "INVALID_REQUEST" });
@@ -70,7 +78,7 @@ describe("Google API broker", () => {
     const payload = { to: "person@example.com", subject: "Hello", body: "Approved text" };
     const token = await issueGoogleCapability("user-1", "personal", ["gmail.send"], 60, { "gmail.send": JSON.stringify(payload) });
     await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.send", { ...payload, body: "changed" })).rejects.toMatchObject({ code: "CONFIRMATION_REQUIRED" });
-    await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.send", payload)).resolves.toBeUndefined();
+    await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.send", payload)).resolves.toEqual({ accountId: "account-1" });
     mocks.returning.mockResolvedValueOnce([]);
     await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.send", payload)).rejects.toMatchObject({ code: "CONFIRMATION_REQUIRED" });
   });
@@ -109,11 +117,19 @@ describe("Google API broker", () => {
     const token = await issueGoogleCapability("user-1", "personal", ["gmail.search"]);
     await expect(verifyGoogleCapability(token, "user-1", "personal", "gmail.send", { to: "x", subject: "x", body: "x" })).rejects.toMatchObject({ code: "CONFIRMATION_REQUIRED" });
   });
+
+  it("keeps docs.search read-only and binds its capability to the expected account", async () => {
+    process.env.GOOGLE_CAPABILITY_SECRET = "a-test-secret-that-is-at-least-32-characters-long";
+    const token = await issueGoogleCapability("user-1", "personal", ["docs.search"]);
+    await expect(verifyGoogleCapability(token, "user-1", "personal", "docs.search")).resolves.toEqual({ accountId: "account-1" });
+    await expect(verifyGoogleCapability(token, "user-1", "personal", "docs.insert", { documentId: "DOC1", text: "change" }))
+      .rejects.toMatchObject({ code: "CONFIRMATION_REQUIRED" });
+  });
   it("builds docs.get using docs.googleapis.com, not www.googleapis.com", async () => {
     mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access-secret", expires_in: 3600 }), { status: 200 }));
     mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ documentId: "DOC1", title: "Test Doc", revisionId: "rev1" }), { status: 200 }));
     await googleReadBroker.getDocument("user-1", "personal", "DOC1");
-    const apiCall = mocks.fetch.mock.calls.at(-1);
+    const apiCall = lastFetchCall();
     expect(String(apiCall[0])).toMatch(/^https:\/\/docs\.googleapis\.com\/v1\/documents\/DOC1/);
     expect(String(apiCall[0])).not.toContain("www.googleapis.com");
   });
@@ -122,7 +138,7 @@ describe("Google API broker", () => {
     mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access-secret", expires_in: 3600 }), { status: 200 }));
     mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ documentId: "NEWDOC1", title: "My Doc" }), { status: 200 }));
     await googleReadBroker.createDocument("user-1", "personal", "My Doc");
-    const apiCall = mocks.fetch.mock.calls.at(-1);
+    const apiCall = lastFetchCall();
     expect(String(apiCall[0])).toMatch(/^https:\/\/docs\.googleapis\.com\/v1\/documents$/);
     expect(String(apiCall[0])).not.toContain("www.googleapis.com");
   });
@@ -131,8 +147,37 @@ describe("Google API broker", () => {
     mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access-secret", expires_in: 3600 }), { status: 200 }));
     mocks.fetch.mockResolvedValueOnce(new Response("document plain text", { status: 200 }));
     await googleReadBroker.exportDocument("user-1", "personal", "DOC1", "text/plain");
-    const apiCall = mocks.fetch.mock.calls.at(-1);
+    const apiCall = lastFetchCall();
     expect(String(apiCall[0])).toMatch(/^https:\/\/www\.googleapis\.com\/drive\/v3\/files\/DOC1\/export/);
     expect(String(apiCall[0])).not.toContain("docs.googleapis.com");
+  });
+
+  it("searches exact Google Doc names with scoped fields, page size, and escaping", async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access-secret", expires_in: 3600 }), { status: 200 }));
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ files: [{ id: "DOC1" }] }), { status: 200 }));
+    await googleBroker.searchDocuments("user-1", "personal", "O'\u0027Reilly \\\\ notes", "exact", "next", "account-1");
+    const url = new URL(String(lastFetchCall()[0]));
+    expect(url.origin + url.pathname).toBe("https://www.googleapis.com/drive/v3/files");
+    expect(url.searchParams.get("q")).toContain("mimeType = 'application/vnd.google-apps.document' and trashed = false");
+    expect(url.searchParams.get("q")).toContain("name = 'O\\'\\'Reilly \\\\\\\\ notes'");
+    expect(url.searchParams.get("pageSize")).toBe("10");
+    expect(url.searchParams.get("pageToken")).toBe("next");
+    expect(url.searchParams.get("fields")).toBe("nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink)");
+  });
+
+  it("uses partial name match and requires persisted drive.readonly", async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "access-secret", expires_in: 3600 }), { status: 200 }));
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ files: [] }), { status: 200 }));
+    await googleBroker.searchDocuments("user-1", "personal", "budget", "partial");
+    expect(new URL(String(lastFetchCall()[0])).searchParams.get("q")).toContain("name contains 'budget'");
+    mocks.findGoogleAccount.mockResolvedValue(account({ grantedScopes: scopes.filter((scope) => !scope.endsWith("drive.readonly")) }));
+    await expect(googleBroker.searchDocuments("user-1", "personal", "budget")).rejects.toMatchObject({ code: "SCOPE_REQUIRED" });
+  });
+
+  it("does not search through a replacement Google account", async () => {
+    mocks.findGoogleAccount.mockResolvedValue(account({ id: "other-account" }));
+    await expect(googleBroker.searchDocuments("user-1", "personal", "budget", "exact", undefined, "account-1"))
+      .rejects.toMatchObject({ code: "RECONNECT_REQUIRED" });
+    expect(mocks.fetch).not.toHaveBeenCalled();
   });
 });

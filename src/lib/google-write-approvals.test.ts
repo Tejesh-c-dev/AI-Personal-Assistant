@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { consumeGoogleWriteApproval, createGoogleWriteApproval } from "./google-write-approvals";
+import { consumeGoogleWriteApproval, createGoogleWriteApproval, rejectGoogleWriteApproval, updateGoogleWriteApprovalStatus } from "./google-write-approvals";
 
 vi.mock("server-only", () => ({}));
 const mocks = vi.hoisted(() => ({
@@ -36,6 +36,22 @@ describe("Google write approvals", () => {
     mocks.update.mockReturnValue({ set: () => ({ where: () => ({ returning: mocks.returning.mockResolvedValue([]) }) }) });
     const result = await consumeGoogleWriteApproval({ id: "approval-1", userId: "user-1", conversationId: "conv-1" });
     expect(result).toBeNull();
+  });
+
+  it("atomically records rejection only when the approval is pending", async () => {
+    const set = vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ returning: mocks.returning.mockResolvedValue([{ id: "approval-1", status: "rejected" }]) }) });
+    mocks.update.mockReturnValue({ set });
+    const result = await rejectGoogleWriteApproval({ id: "approval-1", userId: "user-1", conversationId: "conv-1" });
+    expect(set).toHaveBeenCalledWith({ status: "rejected", consumedAt: expect.any(Date) });
+    expect(result).toMatchObject({ status: "rejected" });
+  });
+
+  it("records terminal execution state after confirmation consumption", async () => {
+    const set = vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ returning: mocks.returning.mockResolvedValue([{ id: "approval-1", status: "approved", result: "Email sent." }]) }) });
+    mocks.update.mockReturnValue({ set });
+    const result = await updateGoogleWriteApprovalStatus({ id: "approval-1", userId: "user-1", conversationId: "conv-1", status: "approved", result: "Email sent." });
+    expect(set).toHaveBeenCalledWith({ status: "approved", result: "Email sent." });
+    expect(result).toMatchObject({ status: "approved" });
   });
 
   it("preserves the approval ID and returns the account label for consumption after a rename", async () => {

@@ -11,7 +11,7 @@ import {
   verifyGoogleCapability,
   type GoogleOperation,
 } from "../google-api";
-import { consumeGoogleWriteApproval } from "../google-write-approvals";
+import { consumeGoogleWriteApproval, updateGoogleWriteApprovalStatus } from "../google-write-approvals";
 
 export interface ConfirmationHandlerResult {
   output: string;
@@ -61,7 +61,7 @@ export async function handleConfirmation(params: {
   approvalId: string;
   user: User;
   conversation: Conversation;
-  selectedAccount: string;
+  selectedAccount?: string;
 }): Promise<ConfirmationHandlerResult> {
   const { approvalId, user, conversation, selectedAccount } = params;
 
@@ -92,7 +92,7 @@ export async function handleConfirmation(params: {
   }
 
   // 3. Require selected account to match approval's exact account label
-  if (selectedAccount.trim().toLowerCase() !== pending.accountLabel.trim().toLowerCase()) {
+  if (selectedAccount && selectedAccount.trim().toLowerCase() !== pending.accountLabel.trim().toLowerCase()) {
     throw new Error(
       `Account mismatch: This operation was approved for the '${pending.accountLabel}' account, but '${selectedAccount}' is currently selected. Please switch accounts to confirm.`,
     );
@@ -115,24 +115,23 @@ export async function handleConfirmation(params: {
     throw new Error("The approval could not be consumed (it may have been consumed concurrently or expired).");
   }
 
-  // 6. Issue and verify capability bound to the exact stored payload and account ID
   const operation = consumed.operation;
-  const payloadString = JSON.stringify(consumed.payload);
-
-  const capability = await issueGoogleCapability(
-    user.id,
-    consumed.label,
-    [operation],
-    300,
-    { [operation]: payloadString },
-    consumed.accountId,
-  );
-
-  await verifyGoogleCapability(capability, user.id, consumed.label, operation, consumed.payload);
-
-  // 7. Execute the exact payload stored in the database
-  let rawResult: unknown;
+  let executionStarted = false;
   try {
+    // The capability is bound to the exact payload consumed from storage.
+    const capability = await issueGoogleCapability(
+      user.id,
+      consumed.label,
+      [operation],
+      300,
+      { [operation]: JSON.stringify(consumed.payload) },
+      consumed.accountId,
+    );
+    await verifyGoogleCapability(capability, user.id, consumed.label, operation, consumed.payload);
+
+    // Invoke the broker with the exact stored payload. Once invoked, failures may be ambiguous.
+    executionStarted = true;
+    let rawResult: unknown;
     switch (operation) {
       case "gmail.send": {
         const input = consumed.payload as { to?: string; subject?: string; body?: string };
@@ -187,15 +186,13 @@ export async function handleConfirmation(params: {
       default:
         throw new Error(`Unsupported write operation: ${operation}`);
     }
+    const output = formatExecutionResult(operation, consumed.label, rawResult);
+    await updateGoogleWriteApprovalStatus({ id: approvalId, userId: user.id, conversationId: conversation.id, status: "approved", result: output });
+    return { output };
   } catch (error) {
-    // If the external call fails after consumption, report the failure honestly.
-    // Do not blindly retry potentially completed non-idempotent operations.
-    if (error instanceof GoogleAuthorizationError) {
-      throw error;
-    }
+    const status = executionStarted && !(error instanceof GoogleAuthorizationError) ? "uncertain" : "failed";
+    await updateGoogleWriteApprovalStatus({ id: approvalId, userId: user.id, conversationId: conversation.id, status });
+    if (error instanceof GoogleAuthorizationError) throw error;
     throw new Error("CONFIRMATION_EXECUTION_FAILED");
   }
-
-  const output = formatExecutionResult(operation, consumed.label, rawResult);
-  return { output };
 }

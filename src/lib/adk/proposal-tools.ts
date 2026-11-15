@@ -8,11 +8,13 @@ import {
   type GoogleOperation,
 } from "../google-api";
 import { createGoogleWriteApproval } from "../google-write-approvals";
+import { createTrustedTimeContext, resolveCalendarTime, type TrustedTimeContext } from "../trusted-time";
 
 export interface ProposalToolContext {
   userId: string;
   conversationId: string;
   selectedLabels: string[];
+  trustedTime?: TrustedTimeContext;
 }
 
 function sanitizeToolName(label: string, action: string): string {
@@ -27,6 +29,7 @@ async function createApprovalForOperation(
   conversationId: string,
   operation: GoogleOperation,
   payload: unknown,
+  displayDetails: Record<string, string>,
 ) {
   const token = await issueGoogleProposalCapability(userId, label, operation, conversationId);
   const verified = await verifyGoogleProposalCapability(token, operation);
@@ -37,6 +40,7 @@ async function createApprovalForOperation(
     googleAccountId: verified.accountId,
     operation,
     payload,
+    displayDetails,
   });
 
   return {
@@ -55,6 +59,7 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
 
   const label = ctx.selectedLabels[0];
   const { userId, conversationId } = ctx;
+  const trustedTime = ctx.trustedTime ?? createTrustedTimeContext("UTC");
 
   const tools: FunctionTool[] = [];
 
@@ -62,21 +67,21 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
   tools.push(
     new FunctionTool({
       name: sanitizeToolName(label, "send_email"),
-      description: `Propose sending an email from the '${label}' account. Creates a pending approval; does NOT send the email.`,
+      description: `Create a proposal to send an email from the '${label}' account. This only creates a pending approval; it never sends email. Use only when the user explicitly asks to send. For a draft/compose request, write the draft in chat and do not create a proposal.`,
       parameters: {
         type: Type.OBJECT,
         properties: {
           to: {
             type: Type.STRING,
-            description: "Recipient email address.",
+            description: "Recipient email address, supplied or confirmed by the user.",
           },
           subject: {
             type: Type.STRING,
-            description: "Email subject line.",
+            description: "Email subject line. Preserve the user's requested meaning and do not invent details.",
           },
           body: {
             type: Type.STRING,
-            description: "Email body content in plain text.",
+            description: "Full proposed plain-text body. The user must explicitly confirm the returned approval ID before any sending occurs.",
           },
         },
         required: ["to", "subject", "body"],
@@ -92,7 +97,7 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
         }
 
         const payload = { to, subject, body };
-        const approval = await createApprovalForOperation(userId, label, conversationId, "gmail.send", payload);
+        const approval = await createApprovalForOperation(userId, label, conversationId, "gmail.send", payload, { to, subject, bodyPreview: body.slice(0, 300) });
 
         return {
           ...approval,
@@ -111,7 +116,7 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
   tools.push(
     new FunctionTool({
       name: sanitizeToolName(label, "create_calendar_event"),
-      description: `Propose creating a new calendar event in the '${label}' account. Creates a pending approval; does NOT create the event.`,
+      description: `Create a proposal to create a new calendar event in the '${label}' account. This only creates a pending approval; it never creates the event. Use only when the user explicitly asks to schedule/create it. For a request to check or find events, use Calendar list instead.`,
       parameters: {
         type: Type.OBJECT,
         properties: {
@@ -119,14 +124,17 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
             type: Type.STRING,
             description: "Title or summary of the event.",
           },
-          start: {
+          date: {
             type: Type.STRING,
-            description: "Start time in ISO/RFC3339 format (e.g. '2026-11-15T10:00:00Z').",
+            description: `Local event date in YYYY-MM-DD, resolved using trusted today ${trustedTime.localDate} (${trustedTime.weekday}) in ${trustedTime.timezone}.`,
           },
-          end: {
+          time: {
             type: Type.STRING,
-            description: "End time in ISO/RFC3339 format (e.g. '2026-11-15T11:00:00Z').",
+            description: "Local start time in 24-hour HH:mm format. Interpret clear 12 AM/PM correctly; clarify genuinely ambiguous AM/PM.",
           },
+          timezone: { type: Type.STRING, description: "Optional explicitly named IANA timezone for this event." },
+          durationMinutes: { type: Type.INTEGER, description: "Optional explicit event duration in minutes." },
+          kind: { type: Type.STRING, description: "Use alarm or reminder for short reminder requests; otherwise event." },
           description: {
             type: Type.STRING,
             description: "Optional event description.",
@@ -136,29 +144,37 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
             description: "Calendar ID, defaults to 'primary'.",
           },
         },
-        required: ["summary", "start", "end"],
+        required: ["summary", "date", "time"],
       } as Schema,
       execute: async (rawInput: unknown) => {
         const input = (rawInput && typeof rawInput === "object" ? rawInput : {}) as Record<string, unknown>;
         const summary = String(input.summary ?? "").trim();
-        const start = String(input.start ?? "").trim();
-        const end = String(input.end ?? "").trim();
+        const date = String(input.date ?? "").trim();
+        const time = String(input.time ?? "").trim();
+        const timezone = typeof input.timezone === "string" ? input.timezone.trim() : undefined;
+        const durationMinutes = input.durationMinutes === undefined ? undefined : Number(input.durationMinutes);
+        const kind = input.kind === "alarm" || input.kind === "reminder" ? input.kind : "event";
         const description = typeof input.description === "string" ? input.description.trim() : undefined;
         const calendarId = String(input.calendarId ?? "primary");
 
-        if (!summary || !start || !end) {
-          return { error: "'summary', 'start', and 'end' are all required to propose a calendar event." };
+        if (!summary || !date || !time) {
+          return { error: "'summary', 'date', and 'time' are all required to propose a calendar event." };
         }
+
+        const resolved = resolveCalendarTime({ reference: trustedTime, date, time, timezone, durationMinutes, kind });
+        if (!resolved.ok) return { error: resolved.message };
+        const timing = resolved.value;
 
         const eventPayload: Record<string, unknown> = {
           summary,
-          start: { dateTime: start },
-          end: { dateTime: end },
+          start: { dateTime: timing.startDateTime, timeZone: timing.timezone },
+          end: { dateTime: timing.endDateTime, timeZone: timing.timezone },
           ...(description ? { description } : {}),
         };
 
-        const payload = { event: eventPayload, calendarId };
-        const approval = await createApprovalForOperation(userId, label, conversationId, "calendar.create", payload);
+        const payload = { event: eventPayload, calendarId, referenceInstant: timing.referenceInstant, localStart: timing.localStart, localEnd: timing.localEnd, timezone: timing.timezone, durationMinutes: timing.durationMinutes, durationSource: timing.durationSource };
+        const displayDetails = { summary, date: timing.localStart.slice(0, 10), start: timing.localStart, end: timing.localEnd, timezone: timing.timezone, durationMinutes: String(timing.durationMinutes), durationSource: timing.durationSource };
+        const approval = await createApprovalForOperation(userId, label, conversationId, "calendar.create", payload, displayDetails);
 
         return {
           ...approval,
@@ -166,8 +182,12 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
             account: label,
             calendarId,
             summary,
-            start,
-            end,
+            date: timing.localStart.slice(0, 10),
+            start: timing.localStart,
+            end: timing.localEnd,
+            timezone: timing.timezone,
+            durationMinutes: String(timing.durationMinutes),
+            durationSource: timing.durationSource,
           },
         };
       },
@@ -198,7 +218,7 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
         }
 
         const payload = { title };
-        const approval = await createApprovalForOperation(userId, label, conversationId, "docs.create", payload);
+        const approval = await createApprovalForOperation(userId, label, conversationId, "docs.create", payload, { title });
 
         return {
           ...approval,
@@ -215,13 +235,17 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
   tools.push(
     new FunctionTool({
       name: sanitizeToolName(label, "insert_document_text"),
-      description: `Propose inserting text into an existing Google Doc in the '${label}' account. Creates a pending approval; does NOT insert text.`,
+      description: `Create an approval proposal to insert text into an identified Google Doc in the '${label}' account. Locate the document with Docs search first when its ID is unknown, and pass both its documentId and displayed name as documentName. This only creates a pending approval; deterministic confirmation is the only path that executes the write.`,
       parameters: {
         type: Type.OBJECT,
         properties: {
           documentId: {
             type: Type.STRING,
-            description: "The Google Docs document ID.",
+            description: "Exact Google Docs document ID from a unique Docs search result or user supplied ID.",
+          },
+          documentName: {
+            type: Type.STRING,
+            description: "Document title shown by the Docs search result, if known. Presentation only; this is not used to execute the write.",
           },
           text: {
             type: Type.STRING,
@@ -233,6 +257,7 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
       execute: async (rawInput: unknown) => {
         const input = (rawInput && typeof rawInput === "object" ? rawInput : {}) as Record<string, unknown>;
         const documentId = String(input.documentId ?? "").trim();
+        const documentName = String(input.documentName ?? "").trim();
         const text = String(input.text ?? "");
 
         if (!documentId || !text) {
@@ -240,13 +265,14 @@ export function buildProposalTools(ctx: ProposalToolContext): FunctionTool[] {
         }
 
         const payload = { documentId, text };
-        const approval = await createApprovalForOperation(userId, label, conversationId, "docs.insert", payload);
+        const displayDetails = { documentName: documentName || "Google document", textPreview: text.slice(0, 200) };
+        const approval = await createApprovalForOperation(userId, label, conversationId, "docs.insert", payload, displayDetails);
 
         return {
           ...approval,
           proposedInsertion: {
             account: label,
-            documentId,
+            documentName: displayDetails.documentName,
             textPreview: text.slice(0, 200),
           },
         };

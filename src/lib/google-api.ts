@@ -9,9 +9,9 @@ import { getDatabase } from "./db";
 import { googleCapabilities } from "./db/schema";
 
 export type GoogleAccountLabel = string;
-export const GOOGLE_OPERATIONS = ["gmail.search", "gmail.get", "gmail.send", "calendar.list", "calendar.get", "calendar.create", "docs.get", "docs.create", "docs.insert", "docs.export"] as const;
+export const GOOGLE_OPERATIONS = ["gmail.search", "gmail.get", "gmail.send", "calendar.list", "calendar.get", "calendar.create", "docs.search", "docs.get", "docs.create", "docs.insert", "docs.export"] as const;
 export type GoogleOperation = typeof GOOGLE_OPERATIONS[number];
-export type GoogleReadOperation = Extract<GoogleOperation, "gmail.search" | "gmail.get" | "calendar.list" | "calendar.get" | "docs.get" | "docs.export">;
+export type GoogleReadOperation = Extract<GoogleOperation, "gmail.search" | "gmail.get" | "calendar.list" | "calendar.get" | "docs.search" | "docs.get" | "docs.export">;
 export class GoogleAuthorizationError extends Error {
   constructor(public readonly code: "RECONNECT_REQUIRED" | "SCOPE_REQUIRED" | "GOOGLE_API_FAILED" | "INVALID_REQUEST" | "CONFIRMATION_REQUIRED") {
     super(code === "RECONNECT_REQUIRED" ? "Reconnect this Google account to continue." : code === "SCOPE_REQUIRED" ? "Reconnect this Google account and grant the required permission." : code === "CONFIRMATION_REQUIRED" ? "Confirm this exact action in a separate user turn before it can run." : code === "INVALID_REQUEST" ? "The Google API request is invalid." : "The Google service could not complete the request.");
@@ -24,7 +24,7 @@ const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const scopes: Record<GoogleOperation, string> = {
   "gmail.search": "https://www.googleapis.com/auth/gmail.modify", "gmail.get": "https://www.googleapis.com/auth/gmail.modify", "gmail.send": "https://www.googleapis.com/auth/gmail.send",
   "calendar.list": "https://www.googleapis.com/auth/calendar.events", "calendar.get": "https://www.googleapis.com/auth/calendar.events", "calendar.create": "https://www.googleapis.com/auth/calendar.events",
-  "docs.get": "https://www.googleapis.com/auth/documents", "docs.create": "https://www.googleapis.com/auth/documents", "docs.insert": "https://www.googleapis.com/auth/documents", "docs.export": "https://www.googleapis.com/auth/drive.readonly",
+  "docs.search": "https://www.googleapis.com/auth/drive.readonly", "docs.get": "https://www.googleapis.com/auth/documents", "docs.create": "https://www.googleapis.com/auth/documents", "docs.insert": "https://www.googleapis.com/auth/documents", "docs.export": "https://www.googleapis.com/auth/drive.readonly",
 };
 const writes = new Set<GoogleOperation>(["gmail.send", "calendar.create", "docs.create", "docs.insert"]);
 function googleAccountVersion(account: { updatedAt?: Date }): number {
@@ -71,6 +71,14 @@ function googleUrl(path: string, params?: Record<string, string>): string { cons
 function docsUrl(path: string, params?: Record<string, string>): string { const url = new URL(`https://docs.googleapis.com/${path}`); for (const [key, value] of Object.entries(params ?? {})) url.searchParams.set(key, value); return url.toString(); }
 
 export const googleBroker = {
+  searchDocuments(userId: string, label: GoogleAccountLabel, name: string, matchMode: "exact" | "partial" = "exact", pageToken?: string, expectedAccountId?: string) {
+    const escaped = name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    const nameQuery = matchMode === "exact" ? `name = '${escaped}'` : `name contains '${escaped}'`;
+    return apiRequest<{ files?: unknown[]; nextPageToken?: unknown }>(userId, label, "docs.search", googleUrl("drive/v3/files", {
+      q: `mimeType = 'application/vnd.google-apps.document' and trashed = false and ${nameQuery}`,
+      pageSize: "10", fields: "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink)", ...(pageToken ? { pageToken } : {}),
+    }), "GET", undefined, expectedAccountId);
+  },
   searchGmail(userId: string, label: GoogleAccountLabel, query: string, maxResults = 20, expectedAccountId?: string) { return apiRequest(userId, label, "gmail.search", googleUrl("gmail/v1/users/me/messages", { q: query, maxResults: String(Math.min(Math.max(maxResults, 1), 100)) }), "GET", undefined, expectedAccountId); },
   getGmailMessage(userId: string, label: GoogleAccountLabel, messageId: string, expectedAccountId?: string) { return apiRequest(userId, label, "gmail.get", googleUrl(`gmail/v1/users/me/messages/${encodeURIComponent(messageId)}`, { format: "full" }), "GET", undefined, expectedAccountId); },
   sendGmail(userId: string, label: GoogleAccountLabel, input: { to: string; subject: string; body: string }, expectedAccountId?: string) { const raw = Buffer.from(`To: ${input.to}\r\nSubject: ${input.subject}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${input.body}`).toString("base64url"); return apiRequest(userId, label, "gmail.send", googleUrl("gmail/v1/users/me/messages/send"), "POST", { raw }, expectedAccountId); },
@@ -126,7 +134,7 @@ export async function verifyGoogleProposalCapability(token: string, operation: G
     return { userId: payload.sub, label: payload.label, conversationId: payload.conversationId, accountId: payload.accountId };
   } catch (error) { if (error instanceof GoogleAuthorizationError) throw error; throw new GoogleAuthorizationError("INVALID_REQUEST"); }
 }
-export async function verifyGoogleCapability(token: string, userId: string, label: GoogleAccountLabel, operation: GoogleOperation, input?: unknown): Promise<void> {
+export async function verifyGoogleCapability(token: string, userId: string, label: GoogleAccountLabel, operation: GoogleOperation, input?: unknown): Promise<{ accountId: string }> {
   try {
     const { payload } = await jwtVerify(token, capabilityKey(), { issuer: CAPABILITY_ISSUER, subject: userId });
     if (payload.label !== label || !Array.isArray(payload.operations) || !payload.operations.includes(operation)) throw new Error();
@@ -138,6 +146,7 @@ export async function verifyGoogleCapability(token: string, userId: string, labe
     if (!activeAccount || activeAccount.status !== "active" || activeAccount.id !== payload.accountId || activeAccount.identityId !== payload.accountIdentityId || googleAccountVersion(activeAccount) !== payload.accountVersion) throw new GoogleAuthorizationError("RECONNECT_REQUIRED");
     if (typeof payload.nonce !== "string") throw new Error();
     await consumeCapabilityNonce(payload.nonce);
+    return { accountId: payload.accountId };
   } catch (error) {
     if (error instanceof GoogleAuthorizationError) throw error;
     throw new GoogleAuthorizationError(writes.has(operation) ? "CONFIRMATION_REQUIRED" : "INVALID_REQUEST");

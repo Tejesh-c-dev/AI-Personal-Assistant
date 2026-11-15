@@ -28,11 +28,11 @@ async function executeWithReadCapability<T>(
   userId: string,
   label: string,
   operation: GoogleReadOperation,
-  fn: () => Promise<T>,
+  fn: (expectedAccountId: string) => Promise<T>,
 ): Promise<T> {
   const token = await issueGoogleCapability(userId, label, [operation]);
-  await verifyGoogleCapability(token, userId, label, operation);
-  return fn();
+  const verified = await verifyGoogleCapability(token, userId, label, operation);
+  return fn(verified.accountId);
 }
 
 function sanitizeGmailMessage(msg: unknown): Record<string, unknown> {
@@ -69,13 +69,13 @@ export function buildReadTools(ctx: ReadToolContext): FunctionTool[] {
     tools.push(
       new FunctionTool({
         name: sanitizeToolName(label, "gmail.search"),
-        description: `Search Gmail messages in the '${label}' account. Returns message summaries.`,
+        description: `Find Gmail messages in the '${label}' account using Gmail search criteria. Use this to discover matching messages (sender, recipient, words, dates, labels, or read status). This returns summaries and IDs. Do not use it to retrieve a known message by ID; use the Gmail get tool for that. Example: query "from:alex@example.com is:unread".`,
         parameters: {
           type: Type.OBJECT,
           properties: {
             query: {
               type: Type.STRING,
-              description: "Gmail search query (e.g., 'from:colleague@example.com is:unread').",
+              description: "Gmail search operators or terms used to find messages, e.g. 'from:alex@example.com after:2026/01/01'. Required; this is not a message ID.",
             },
             maxResults: {
               type: Type.NUMBER,
@@ -109,13 +109,13 @@ export function buildReadTools(ctx: ReadToolContext): FunctionTool[] {
     tools.push(
       new FunctionTool({
         name: sanitizeToolName(label, "gmail.get"),
-        description: `Retrieve details of a single Gmail message by ID from the '${label}' account.`,
+        description: `Retrieve details of one already-known Gmail message by its messageId from the '${label}' account. Use after a search result or when the user supplied the ID. This does not search by sender, subject, or other criteria; use Gmail search to find messages.`,
         parameters: {
           type: Type.OBJECT,
           properties: {
             messageId: {
               type: Type.STRING,
-              description: "The Gmail message ID.",
+              description: "Exact Gmail message ID from a previous result or user input; do not put search criteria here.",
             },
           },
           required: ["messageId"],
@@ -139,7 +139,7 @@ export function buildReadTools(ctx: ReadToolContext): FunctionTool[] {
     tools.push(
       new FunctionTool({
         name: sanitizeToolName(label, "calendar.list"),
-        description: `List upcoming calendar events from the '${label}' account.`,
+        description: `Find calendar events in a time range in the '${label}' account. Use for schedules, date ranges, or finding events by time. Returns event summaries and IDs. To retrieve details for a known event ID, use Calendar get.`,
         parameters: {
           type: Type.OBJECT,
           properties: {
@@ -149,11 +149,11 @@ export function buildReadTools(ctx: ReadToolContext): FunctionTool[] {
             },
             timeMin: {
               type: Type.STRING,
-              description: "Start of time range in ISO/RFC3339 format (e.g., '2026-11-14T00:00:00Z').",
+              description: "Inclusive start of the requested time range in RFC3339, including timezone (e.g. '2026-11-14T00:00:00-05:00'). Use with timeMax to bound a range.",
             },
             timeMax: {
               type: Type.STRING,
-              description: "End of time range in ISO/RFC3339 format.",
+              description: "Exclusive end of the requested time range in RFC3339, including timezone. Use with timeMin to bound a range.",
             },
           },
         } as Schema,
@@ -187,13 +187,13 @@ export function buildReadTools(ctx: ReadToolContext): FunctionTool[] {
     tools.push(
       new FunctionTool({
         name: sanitizeToolName(label, "calendar.get"),
-        description: `Get details of a specific calendar event by ID from the '${label}' account.`,
+        description: `Retrieve details of one already-known calendar event by exact eventId from the '${label}' account. Use an ID from Calendar list or the user. This does not find events by date, title, or attendee; use Calendar list for that.`,
         parameters: {
           type: Type.OBJECT,
           properties: {
             eventId: {
               type: Type.STRING,
-              description: "The calendar event ID.",
+              description: "Exact event ID from a prior Calendar list result or user input; not a title or search query.",
             },
             calendarId: {
               type: Type.STRING,
@@ -227,17 +227,52 @@ export function buildReadTools(ctx: ReadToolContext): FunctionTool[] {
       }),
     );
 
-    // 5. Docs get
+    // 5. Docs search
+    tools.push(
+      new FunctionTool({
+        name: sanitizeToolName(label, "docs.search"),
+        description: `Find Google Docs by name in the '${label}' account. Search exact title first; if no results, retry using partial matching. Use the unique result's documentId for Docs get, export, or an insert proposal. If multiple results remain, ask the user to choose using title, modified date, and account label.`,
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            name: { type: Type.STRING, description: "Document name or distinctive title text, not a document ID." },
+            matchMode: { type: Type.STRING, description: "Use 'exact' first, then 'partial' only if exact returns no files." },
+            pageToken: { type: Type.STRING, description: "Optional Drive page token to continue this same match mode." },
+          },
+          required: ["name", "matchMode"],
+        } as Schema,
+        execute: async (rawInput: unknown) => {
+          const input = (rawInput && typeof rawInput === "object" ? rawInput : {}) as Record<string, unknown>;
+          const name = typeof input.name === "string" ? input.name.trim() : "";
+          const matchMode = input.matchMode === "partial" ? "partial" : input.matchMode === "exact" ? "exact" : null;
+          const pageToken = typeof input.pageToken === "string" && input.pageToken.trim() ? input.pageToken.trim() : undefined;
+          if (!name || !matchMode) return { error: "A name and matchMode ('exact' or 'partial') are required." };
+          return executeWithReadCapability(userId, label, "docs.search", async (expectedAccountId) => {
+            const raw = await googleBroker.searchDocuments(userId, label, name, matchMode, pageToken, expectedAccountId);
+            const result = raw && typeof raw === "object" ? raw as { files?: unknown[]; nextPageToken?: unknown } : {};
+            const files = Array.isArray(result.files) ? result.files.slice(0, 10).flatMap((file) => {
+              if (!file || typeof file !== "object") return [];
+              const record = file as Record<string, unknown>;
+              if (typeof record.id !== "string" || typeof record.name !== "string" || record.mimeType !== "application/vnd.google-apps.document") return [];
+              return [{ documentId: record.id, name: record.name, mimeType: record.mimeType, modifiedTime: typeof record.modifiedTime === "string" ? record.modifiedTime : undefined, webViewLink: typeof record.webViewLink === "string" ? record.webViewLink : undefined, account: label }];
+            }) : [];
+            return { files, ...(typeof result.nextPageToken === "string" ? { nextPageToken: result.nextPageToken } : {}) };
+          });
+        },
+      }),
+    );
+
+    // 6. Docs get
     tools.push(
       new FunctionTool({
         name: sanitizeToolName(label, "docs.get"),
-        description: `Retrieve metadata and structure of a Google Doc by document ID from the '${label}' account.`,
+        description: `Retrieve metadata and structure for an identified Google Doc by known documentId in the '${label}' account. This returns metadata, not document text. Use Docs export to read/export text content; use Docs search to discover a document by name.`,
         parameters: {
           type: Type.OBJECT,
           properties: {
             documentId: {
               type: Type.STRING,
-              description: "The Google Docs document ID.",
+              description: "Exact Google Docs document ID already known from the user or another result; not a title or search query.",
             },
           },
           required: ["documentId"],
@@ -266,17 +301,17 @@ export function buildReadTools(ctx: ReadToolContext): FunctionTool[] {
     tools.push(
       new FunctionTool({
         name: sanitizeToolName(label, "docs.export"),
-        description: `Export the text content of a Google Doc from the '${label}' account.`,
+        description: `Export text from an identified Google Doc in the '${label}' account by known documentId. Use this when the user asks to read, quote, or summarize document contents. Locate by name with Docs search first when needed.`,
         parameters: {
           type: Type.OBJECT,
           properties: {
             documentId: {
               type: Type.STRING,
-              description: "The Google Docs document ID.",
+              description: "Exact Google Docs document ID already known from the user or another result; not a title or search query.",
             },
             mimeType: {
               type: Type.STRING,
-              description: "Export format, defaults to 'text/plain'.",
+              description: "Requested export MIME type; defaults to 'text/plain' for readable text. Examples: 'text/plain' or 'text/html'.",
             },
           },
           required: ["documentId"],

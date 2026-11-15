@@ -13,6 +13,7 @@
     "lint": "eslint",
     "test": "vitest run",
     "smoke:openrouter": "node --conditions=react-server --import tsx scripts/smoke-openrouter.ts",
+    "eval:google-routing": "node --conditions=react-server --import tsx scripts/eval-google-routing.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:staging": "drizzle-kit migrate --config drizzle.staging.config.ts",

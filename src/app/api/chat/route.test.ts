@@ -56,6 +56,7 @@ import { GoogleAuthorizationError } from "../../../lib/google-api";
 const originalFetch = globalThis.fetch;
 
 function makeRequest(body: unknown, headers: Record<string, string> = {}) {
+  if (body && typeof body === "object" && !Array.isArray(body) && !("timezone" in body)) body = { ...(body as Record<string, unknown>), timezone: "America/Los_Angeles" };
   return new Request("http://localhost/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
@@ -71,6 +72,14 @@ afterEach(() => {
 });
 
 describe("POST /api/chat", () => {
+  it("rejects missing and invalid browser timezones before processing a chat request", async () => {
+    const missing = await POST(makeRequest({ message: "Hello", sessionId: "00000000-0000-4000-8000-000000000002", account: "personal", timezone: "" }));
+    const invalid = await POST(makeRequest({ message: "Hello", sessionId: "00000000-0000-4000-8000-000000000002", account: "personal", timezone: "Mars/Olympus" }));
+    expect(missing.status).toBe(400);
+    expect(invalid.status).toBe(400);
+    expect(adkMocks.createRunner).not.toHaveBeenCalled();
+  });
+
   it("returns 401 without a server session", async () => {
     vi.mocked(auth.getCurrentUser).mockResolvedValueOnce(null);
 
@@ -365,6 +374,21 @@ describe("POST /api/chat", () => {
       });
     });
 
+    it("keeps textual confirmation deterministic when the legacy chat provider is enabled", async () => {
+      vi.stubEnv("USE_ADK", "false");
+      adkMocks.handleConfirmation.mockResolvedValueOnce({ output: "Email sent." });
+      const fetchMock = vi.fn();
+      globalThis.fetch = fetchMock;
+      const response = await POST(makeRequest({
+        message: "CONFIRM 11111111-2222-4333-8444-555555555555",
+        sessionId: "00000000-0000-4000-8000-000000000002",
+        account: "personal",
+      }));
+      expect(response.status).toBe(200);
+      expect(adkMocks.handleConfirmation).toHaveBeenCalledOnce();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it("returns a stable client error when confirmation validation fails", async () => {
       vi.stubEnv("USE_ADK", "true");
       adkMocks.handleConfirmation.mockRejectedValueOnce(new Error("Account mismatch"));
@@ -477,6 +501,7 @@ describe("POST /api/chat", () => {
         conversation: expect.objectContaining({ id: "00000000-0000-4000-8000-000000000001" }),
         selectedAccount: "personal",
         connectedLabels: ["personal"],
+        trustedTime: expect.objectContaining({ timezone: "America/Los_Angeles", referenceInstant: expect.any(String) }),
       });
       expect(fetchMock).not.toHaveBeenCalled();
     });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  actOnApproval,
   createChatRequest,
   parseAssistantResponse,
   sendChatMessage,
@@ -8,11 +9,23 @@ import {
 } from "./chat-api";
 
 describe("chat API helpers", () => {
+  it("posts only the exact approval and conversation identity to the local action endpoint", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ status: "approved", result: "Event created." }), { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(actOnApproval("approval-uuid", "conversation-uuid", "confirm")).resolves.toMatchObject({ status: "approved", result: "Event created." });
+    expect(fetcher).toHaveBeenCalledWith("/api/approvals/approval-uuid", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ conversationId: "conversation-uuid", action: "confirm" }),
+    }));
+    vi.unstubAllGlobals();
+  });
+
   it("maps the selected account and preserves the conversation session", () => {
     expect(createChatRequest("  Check my emails  ", "conversation-uuid", "Personal")).toEqual({
       message: "Check my emails",
       sessionId: "conversation-uuid",
       account: "personal",
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
     expect(createChatRequest("Check work", "conversation-uuid", "Official").account).toBe("official");
     expect(createChatRequest("Check both", "conversation-uuid", "Both").account).toBe("both");
@@ -32,6 +45,7 @@ describe("chat API helpers", () => {
           message: "Check my emails",
           sessionId: "conversation-uuid",
           account: "personal",
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         }),
       }),
     );
